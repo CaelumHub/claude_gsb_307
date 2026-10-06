@@ -1,0 +1,10 @@
+[
+  {
+    "id": "proj_1791298319304_0e434a",
+    "name": "演示项目 · 测试与CI",
+    "description": "内置示例用例、套件、环境与通知集成的演示项目。",
+    "repo_url": "https://example.com/demo",
+    "auto_create_defects": true,
+    "created_at": 1791298319.304804
+  }
+]

@@ -1,0 +1,28 @@
+[
+  {
+    "id": "def_1791298320006_a621e4",
+    "project_id": "proj_1791298319304_0e434a",
+    "title": "[自动] 用例失败: 正则断言",
+    "description": "期望匹配 /^\\d+\\.\\d+/",
+    "severity": "minor",
+    "status": "open",
+    "source_case_id": "case_1791298319325_1ca4c8",
+    "source_build_id": "build_1791298319336_efd70a",
+    "assignee": "",
+    "tags": [],
+    "created_at": 1791298320.006389
+  },
+  {
+    "id": "def_1791298320008_02190f",
+    "project_id": "proj_1791298319304_0e434a",
+    "title": "[自动] 用例失败: 失败注入接口",
+    "description": "期望状态码 == 200",
+    "severity": "minor",
+    "status": "open",
+    "source_case_id": "case_1791298319321_4a0c2f",
+    "source_build_id": "build_1791298319336_efd70a",
+    "assignee": "",
+    "tags": [],
+    "created_at": 1791298320.0084352
+  }
+]

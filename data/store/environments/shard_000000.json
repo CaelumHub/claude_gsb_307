@@ -1,0 +1,66 @@
+[
+  {
+    "id": "env_1791298319306_7b142b",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "dev 开发环境",
+    "description": "",
+    "python_version": "3.11",
+    "base_image": "python:3.11-slim",
+    "variables": {
+      "BASE_URL": "http://dev.mock.local",
+      "REGION": "dev"
+    },
+    "dependencies": [
+      {
+        "name": "requests",
+        "constraint": ">=2.28"
+      },
+      {
+        "name": "pytest",
+        "constraint": ">=7.0"
+      },
+      {
+        "name": "flask",
+        "constraint": ">=3.0"
+      }
+    ],
+    "config": {
+      "base_url": "http://dev.mock.local",
+      "latency_ms": 15,
+      "fail_rate": 0.0
+    },
+    "created_at": 1791298319.306705
+  },
+  {
+    "id": "env_1791298319308_930778",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "staging 预发环境",
+    "description": "",
+    "python_version": "3.12",
+    "base_image": "python:3.12-slim",
+    "variables": {
+      "BASE_URL": "http://staging.mock.local",
+      "REGION": "staging"
+    },
+    "dependencies": [
+      {
+        "name": "requests",
+        "constraint": ">=2.30"
+      },
+      {
+        "name": "django",
+        "constraint": ">=4.2"
+      },
+      {
+        "name": "numpy",
+        "constraint": ">=1.24"
+      }
+    ],
+    "config": {
+      "base_url": "http://staging.mock.local",
+      "latency_ms": 45,
+      "fail_rate": 0.15
+    },
+    "created_at": 1791298319.3085582
+  }
+]

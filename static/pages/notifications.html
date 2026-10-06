@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>通知与集成 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .int-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
+    .evt { font-size: 13px; padding: 7px 4px; border-bottom: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">通知与集成</h1>
+    <p class="page-desc">配置 Webhook / Slack / Email / 钉钉 集成，构建结束时自动通知并记录投递日志。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn" id="btn-new">新建集成</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>集成列表</h2>
+        <div id="int-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card" id="edit-card">
+        <h2 id="edit-title">新建集成</h2>
+        <div class="grid cols-2">
+          <div><label>类型</label><select id="i-type" onchange="typeChanged()">
+            <option value="webhook">Webhook</option><option value="slack">Slack</option>
+            <option value="email">Email</option><option value="dingtalk">钉钉</option>
+          </select></div>
+          <div><label>名称</label><input type="text" id="i-name"></div>
+        </div>
+        <div class="mt"><label id="i-target-label">URL</label>
+          <input type="text" id="i-target" placeholder="https://example.com/hooks/ci"></div>
+        <div class="mt">
+          <label>订阅事件</label>
+          <div class="row" style="gap:16px">
+            <label style="font-weight:400;color:var(--text);display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="evt-chk" value="build.finished" checked style="width:auto"> 构建结束</label>
+            <label style="font-weight:400;color:var(--text);display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="evt-chk" value="build.passed" style="width:auto"> 构建成功</label>
+            <label style="font-weight:400;color:var(--text);display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="evt-chk" value="build.failed" style="width:auto"> 构建失败</label>
+          </div>
+        </div>
+        <div class="mt">
+          <label style="display:inline-flex;gap:6px;font-weight:400;color:var(--text);align-items:center">
+            <input type="checkbox" id="i-enabled" checked style="width:auto"> 启用
+          </label>
+        </div>
+        <div class="row mt">
+          <button class="btn" id="btn-save">保存</button>
+          <button class="btn secondary" id="btn-cancel">取消</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>投递事件日志</h2>
+      <div id="event-list"><div class="empty">加载中…</div></div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("notifications");
+
+const TYPE_LABELS = { webhook: "Webhook", slack: "Slack", email: "Email", dingtalk: "钉钉" };
+let projectId = null;
+let integrations = [];
+let editingId = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await refresh();
+}
+
+async function switchProject(id) { projectId = id; editingId = null; await refresh(); }
+
+async function refresh() { await Promise.all([loadIntegrations(), loadEvents()]); }
+
+async function loadIntegrations() {
+  const d = await api(`/api/projects/${projectId}/integrations`);
+  integrations = d.integrations || [];
+  const host = $("#int-list");
+  if (!integrations.length) { host.innerHTML = '<div class="empty">还没有集成，点击「新建集成」。</div>'; return; }
+  host.innerHTML = integrations.map(x => `
+    <div class="int-item">
+      <div class="row spread">
+        <div class="row"><span class="badge violet">${esc(TYPE_LABELS[x.type]||x.type)}</span><strong>${esc(x.name)}</strong>
+          <span class="badge ${x.enabled?'blue':'pending'}">${x.enabled?'启用':'停用'}</span></div>
+        <div class="row">
+          <button class="btn small secondary" onclick="test('${x.id}')">测试</button>
+          <button class="btn small secondary" onclick="toggle('${x.id}', ${!x.enabled})">${x.enabled?'停用':'启用'}</button>
+          <button class="btn small secondary" onclick="editInt('${x.id}')">编辑</button>
+          <button class="btn small danger" onclick="delInt('${x.id}')">删除</button>
+        </div>
+      </div>
+      <div class="mt muted" style="font-size:13px">目标: ${esc((x.config||{}).url||(x.config||{}).address||(x.config||{}).channel||"未配置")}</div>
+      <div class="mt" style="font-size:12px">${(x.events||[]).map(e => `<span class="tag">${esc(e)}</span>`).join("")}</div>
+    </div>`).join("");
+}
+
+async function loadEvents() {
+  const d = await api(`/api/projects/${projectId}/events`);
+  const events = d.events || [];
+  const host = $("#event-list");
+  if (!events.length) { host.innerHTML = '<div class="empty">暂无投递记录</div>'; return; }
+  host.innerHTML = `<div style="max-height:360px;overflow:auto">` + events.slice(0, 80).map(e => `
+    <div class="evt row spread">
+      <span class="mono" style="font-size:12px">${fmtTime(e.created_at)}</span>
+      <span class="badge ${e.status==='delivered'?'ok':'error'}">${esc(e.status)}</span>
+      <span>${esc(e.integration_name||e.integration_id)} · ${esc(e.event)}</span>
+      <span class="muted" style="font-size:12px">→ ${esc(e.recipient)} (${e.latency_ms}ms)</span>
+    </div>`).join("") + "</div>";
+}
+
+function typeChanged() {
+  const t = $("#i-type").value;
+  const map = { webhook: ["URL", "https://example.com/hooks/ci"],
+    slack: ["Webhook URL", "https://hooks.slack.com/services/..."],
+    email: ["收件地址", "qa@example.com"],
+    dingtalk: ["机器人 Webhook", "https://oapi.dingtalk.com/robot/send?access_token=..."] };
+  $("#i-target-label").textContent = map[t][0];
+  $("#i-target").placeholder = map[t][1];
+  $("#i-name").value = $("#i-name").value || TYPE_LABELS[t];
+}
+
+function newInt() {
+  editingId = null;
+  $("#edit-title").textContent = "新建集成";
+  $("#i-type").value = "webhook"; $("#i-name").value = ""; $("#i-enabled").checked = true;
+  $$(".evt-chk").forEach(c => c.checked = c.value === "build.finished");
+  typeChanged();
+}
+
+function editInt(id) {
+  const x = integrations.find(v => v.id === id);
+  if (!x) return;
+  editingId = id;
+  $("#edit-title").textContent = "编辑集成";
+  $("#i-type").value = x.type; $("#i-name").value = x.name || ""; $("#i-enabled").checked = x.enabled !== false;
+  const target = (x.config||{}).url || (x.config||{}).address || (x.config||{}).channel || "";
+  $("#i-target").value = target;
+  $$(".evt-chk").forEach(c => c.checked = (x.events||[]).includes(c.value));
+  typeChanged();
+}
+
+async function toggle(id, enabled) {
+  await api(`/api/integrations/${id}`, { method: "PUT", body: { enabled } });
+  toast(enabled ? "已启用" : "已停用");
+  refresh();
+}
+
+async function delInt(id) {
+  if (!confirm("确认删除该集成？")) return;
+  await api(`/api/integrations/${id}`, { method: "DELETE" });
+  toast("已删除");
+  refresh();
+}
+
+async function test(id) {
+  const r = await api(`/api/integrations/${id}/test`, { method: "POST" });
+  toast(`测试投递: ${r.status} (${r.latency_ms}ms)`, r.status === "delivered" ? "ok" : "error");
+  loadEvents();
+}
+
+$("#btn-new").onclick = newInt;
+$("#btn-cancel").onclick = () => { editingId = null; };
+
+$("#btn-save").onclick = async () => {
+  const type = $("#i-type").value;
+  const target = $("#i-target").value.trim();
+  const config = type === "email" ? { address: target } : type === "slack" ? { url: target }
+    : type === "dingtalk" ? { url: target } : { url: target };
+  const body = { type, name: $("#i-name").value || TYPE_LABELS[type], enabled: $("#i-enabled").checked,
+    config, events: $$(".evt-chk").filter(c => c.checked).map(c => c.value) };
+  if (editingId) {
+    await api(`/api/integrations/${editingId}`, { method: "PUT", body });
+    toast("已保存");
+  } else {
+    await api(`/api/projects/${projectId}/integrations`, { method: "POST", body });
+    toast("已创建");
+  }
+  refresh();
+};
+
+init();
+</script>
+</body>
+</html>

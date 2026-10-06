@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>执行监控 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .build-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px;
+      cursor: pointer; transition: all .12s; }
+    .build-item:hover { border-color: var(--primary); }
+    .build-item.active { border-color: var(--primary); background: var(--primary-soft); }
+    .build-list { max-height: 640px; overflow: auto; }
+    .live { display: flex; gap: 20px; }
+    .live .console { flex: 1; min-height: 320px; }
+    .meta-line { font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+    .result-item { font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">执行监控</h1>
+    <p class="page-desc">实时查看构建状态与日志，支持取消运行中的构建。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <label style="margin:0 6px 0 0 12px">过滤</label>
+        <select id="filter" style="max-width:140px" onchange="loadBuilds()">
+          <option value="">全部</option><option>running</option><option>passed</option><option>failed</option><option>cancelled</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn secondary" id="btn-refresh">刷新</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>构建列表</h2>
+        <div class="build-list" id="build-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card">
+        <div class="row spread">
+          <h2 style="margin:0" id="live-title">请选择构建</h2>
+          <button class="btn danger small" id="btn-cancel" style="display:none">取消构建</button>
+        </div>
+        <div id="live-meta"></div>
+        <div class="mt"><label>实时日志</label>
+          <div class="console" id="console">—</div></div>
+        <div class="mt"><h3>用例结果</h3><div id="results"></div></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("monitor");
+
+let projectId = null;
+let builds = [];
+let currentBuild = null;
+let logSeq = 0;
+let pollTimer = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadBuilds();
+  // 自动选中最近一个运行中的构建
+  const running = builds.find(b => b.status === "running");
+  if (running) selectBuild(running.id);
+  else if (builds[0]) selectBuild(builds[0].id);
+}
+
+async function switchProject(id) { projectId = id; currentBuild = null; stopPoll(); await loadBuilds(); }
+
+async function loadBuilds() {
+  if (!projectId) return;
+  const d = await api(`/api/builds?project_id=${projectId}`);
+  builds = d.builds || [];
+  const f = $("#filter").value;
+  const list = f ? builds.filter(b => b.status === f) : builds;
+  const host = $("#build-list");
+  if (!list.length) { host.innerHTML = '<div class="empty">暂无构建，到「套件」页触发一次执行。</div>'; return; }
+  host.innerHTML = list.map(b => {
+    const total = b.total || 0, done = (b.passed||0)+(b.failed||0)+(b.error||0)+(b.timeout||0)+(b.skipped||0);
+    const ratio = total ? done/total : 0;
+    return `<div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
+      <div class="row spread">
+        <div class="row"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
+        <span class="muted mono" style="font-size:12px">${fmtTime(b.created_at)}</span>
+      </div>
+      <div class="mt" style="font-size:12px;color:var(--text-muted)">通过 ${b.passed||0} / 共 ${total}
+        · 失败 ${(b.failed||0)+(b.error||0)} · 耗时 ${fmtDur(b.duration)}</div>
+      ${progressBar(ratio, b.status==='passed'?'green':(b.status==='failed'?'red':''))}
+    </div>`;
+  }).join("");
+}
+
+function selectBuild(id) {
+  currentBuild = id;
+  logSeq = 0;
+  $("#console").textContent = "等待日志…";
+  $$(".build-item").forEach(el => el.classList.remove("active"));
+  loadBuilds();
+  poll();
+  stopPoll();
+  pollTimer = setInterval(poll, 1200);
+}
+
+function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+async function poll() {
+  if (!currentBuild) return;
+  try {
+    const b = await api(`/api/builds/${currentBuild}`);
+    $("#live-title").textContent = b.name || b.id;
+    const total = b.total || 0, done = (b.passed||0)+(b.failed||0)+(b.error||0)+(b.timeout||0)+(b.skipped||0);
+    $("#live-meta").innerHTML = `
+      <div class="row mt">${statusBadge(b.status)}
+        <span class="muted" style="font-size:13px">通过 <strong>${b.passed||0}</strong> / 失败 <strong style="color:var(--red)">${(b.failed||0)+(b.error||0)+(b.timeout||0)}</strong> / 共 ${total}</span>
+        <span class="muted mono" style="font-size:12px">触发: ${esc(b.trigger||'manual')} · ${fmtTime(b.started_at)}</span>
+      </div>
+      ${progressBar(total ? done/total : 0, b.status==='passed'?'green':(b.status==='failed'||b.status==='error'?'red':''))}`;
+    const running = b.status === "running" || b.status === "pending";
+    $("#btn-cancel").style.display = running ? "inline-flex" : "none";
+
+    // 日志增量
+    const logs = await api(`/api/builds/${currentBuild}/logs?after=${logSeq}`);
+    if (logs.lines && logs.lines.length) {
+      const con = $("#console");
+      if (con.textContent === "等待日志…" || con.textContent === "—") con.textContent = "";
+      con.textContent += logs.lines.join("\n") + "\n";
+      con.scrollTop = con.scrollHeight;
+    }
+    logSeq = logs.next_seq || logSeq;
+
+    // 用例结果
+    const res = await api(`/api/builds/${currentBuild}/results`);
+    renderResults(res.results || [], running);
+  } catch (e) { /* 构建可能被删除 */ }
+}
+
+function renderResults(results, running) {
+  const host = $("#results");
+  if (!results.length) { host.innerHTML = '<div class="muted">' + (running ? "执行中，暂无结果…" : "无结果") + '</div>'; return; }
+  host.innerHTML = `<div style="max-height:260px;overflow:auto">` + results.map(r => `
+    <div class="result-item row spread">
+      <span>${esc(r.case_name||r.case_id)} ${statusBadge(r.status)}</span>
+      <span class="mono muted" style="font-size:12px">${fmtDur(r.duration)}</span>
+    </div>`).join("") + "</div>";
+}
+
+$("#btn-cancel").onclick = async () => {
+  if (!currentBuild) return;
+  if (!confirm("确认取消该构建？")) return;
+  await api(`/api/builds/${currentBuild}/cancel`, { method: "POST" });
+  toast("已请求取消");
+};
+
+$("#btn-refresh").onclick = loadBuilds;
+
+init();
+</script>
+</body>
+</html>

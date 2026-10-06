@@ -1,0 +1,189 @@
+{
+  "build_id": "build_1791298319336_efd70a",
+  "project_id": "proj_1791298319304_0e434a",
+  "name": "冒烟测试套件",
+  "status": "failed",
+  "trigger": "auto_seed",
+  "suite_id": "suite_1791298319327_c6d5eb",
+  "env_id": "env_1791298319306_7b142b",
+  "started_at": 1791298319.3406665,
+  "finished_at": 1791298319.9935536,
+  "duration": 0.653,
+  "summary": {
+    "total": 8,
+    "passed": 6,
+    "failed": 2,
+    "error": 0,
+    "skipped": 0,
+    "timeout": 0,
+    "pass_rate": 75.0
+  },
+  "durations": {
+    "avg": 0.103,
+    "median": 0.034,
+    "p95": 0.431,
+    "p99": 0.595,
+    "max": 0.636,
+    "min": 0.0
+  },
+  "by_group": {
+    "unit": {
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0,
+      "duration": 0.0
+    },
+    "chaos": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0,
+      "duration": 0.025
+    },
+    "smoke": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0,
+      "duration": 0.077
+    },
+    "api": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0,
+      "duration": 0.083
+    },
+    "perf": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0,
+      "duration": 0.636
+    }
+  },
+  "by_priority": {
+    "P2": {
+      "total": 3,
+      "passed": 2,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0
+    },
+    "P3": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0
+    },
+    "P0": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0
+    },
+    "P1": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "error": 0,
+      "skipped": 0,
+      "timeout": 0
+    }
+  },
+  "slowest": [
+    {
+      "case_id": "case_1791298319319_d4b19e",
+      "case_name": "慢接口（性能）",
+      "status": "passed",
+      "duration": 0.636,
+      "group": "perf"
+    },
+    {
+      "case_id": "case_1791298319311_638fc4",
+      "case_name": "健康检查接口",
+      "status": "passed",
+      "duration": 0.049,
+      "group": "smoke"
+    },
+    {
+      "case_id": "case_1791298319317_133b92",
+      "case_name": "创建项目",
+      "status": "passed",
+      "duration": 0.044,
+      "group": "api"
+    },
+    {
+      "case_id": "case_1791298319315_9c3e18",
+      "case_name": "用户列表查询",
+      "status": "passed",
+      "duration": 0.039,
+      "group": "api"
+    },
+    {
+      "case_id": "case_1791298319313_2f0f95",
+      "case_name": "登录接口",
+      "status": "passed",
+      "duration": 0.028,
+      "group": "smoke"
+    },
+    {
+      "case_id": "case_1791298319321_4a0c2f",
+      "case_name": "失败注入接口",
+      "status": "failed",
+      "duration": 0.025,
+      "group": "chaos"
+    },
+    {
+      "case_id": "case_1791298319323_15490a",
+      "case_name": "字符串断言",
+      "status": "passed",
+      "duration": 0.0,
+      "group": "unit"
+    },
+    {
+      "case_id": "case_1791298319325_1ca4c8",
+      "case_name": "正则断言",
+      "status": "failed",
+      "duration": 0.0,
+      "group": "unit"
+    }
+  ],
+  "failures": [
+    {
+      "case_id": "case_1791298319325_1ca4c8",
+      "case_name": "正则断言",
+      "status": "failed",
+      "group": "unit",
+      "priority": "P3",
+      "duration": 0.0,
+      "reason": "期望匹配 /^\\d+\\.\\d+/"
+    },
+    {
+      "case_id": "case_1791298319321_4a0c2f",
+      "case_name": "失败注入接口",
+      "status": "failed",
+      "group": "chaos",
+      "priority": "P2",
+      "duration": 0.025,
+      "reason": "期望状态码 == 200"
+    }
+  ],
+  "generated_at": 1791298319.996503
+}

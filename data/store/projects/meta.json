@@ -1,0 +1,8 @@
+{
+  "name": "projects",
+  "shard_size": 200,
+  "shard_count": 1,
+  "total": 1,
+  "next_id": 2,
+  "created_at": 1791298319.3035111
+}

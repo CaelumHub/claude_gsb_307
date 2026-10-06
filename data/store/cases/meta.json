@@ -1,0 +1,8 @@
+{
+  "name": "cases",
+  "shard_size": 200,
+  "shard_count": 1,
+  "total": 8,
+  "next_id": 9,
+  "created_at": 1791298319.3106537
+}

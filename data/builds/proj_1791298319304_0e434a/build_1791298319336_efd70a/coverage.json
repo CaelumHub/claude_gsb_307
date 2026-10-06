@@ -1,0 +1,95 @@
+{
+  "project_id": "proj_1791298319304_0e434a",
+  "build_id": "build_1791298319336_efd70a",
+  "percent": 73.9,
+  "total_lines": 3545,
+  "covered_lines": 2618,
+  "missed_lines": 927,
+  "files": [
+    {
+      "file": "src/api/projects.py",
+      "lines": 290,
+      "covered": 167,
+      "missed": 123,
+      "percent": 57.6
+    },
+    {
+      "file": "src/utils/http.py",
+      "lines": 158,
+      "covered": 103,
+      "missed": 55,
+      "percent": 65.2
+    },
+    {
+      "file": "src/utils/log.py",
+      "lines": 96,
+      "covered": 63,
+      "missed": 33,
+      "percent": 65.6
+    },
+    {
+      "file": "src/core/scheduler.py",
+      "lines": 448,
+      "covered": 299,
+      "missed": 149,
+      "percent": 66.7
+    },
+    {
+      "file": "src/core/validator.py",
+      "lines": 236,
+      "covered": 168,
+      "missed": 68,
+      "percent": 71.2
+    },
+    {
+      "file": "src/storage/lock.py",
+      "lines": 188,
+      "covered": 136,
+      "missed": 52,
+      "percent": 72.3
+    },
+    {
+      "file": "src/utils/retry.py",
+      "lines": 122,
+      "covered": 89,
+      "missed": 33,
+      "percent": 73.0
+    },
+    {
+      "file": "src/api/auth.py",
+      "lines": 420,
+      "covered": 308,
+      "missed": 112,
+      "percent": 73.3
+    },
+    {
+      "file": "src/core/executor.py",
+      "lines": 512,
+      "covered": 388,
+      "missed": 124,
+      "percent": 75.8
+    },
+    {
+      "file": "src/storage/sharded.py",
+      "lines": 402,
+      "covered": 317,
+      "missed": 85,
+      "percent": 78.9
+    },
+    {
+      "file": "src/api/users.py",
+      "lines": 368,
+      "covered": 300,
+      "missed": 68,
+      "percent": 81.5
+    },
+    {
+      "file": "src/core/report.py",
+      "lines": 305,
+      "covered": 280,
+      "missed": 25,
+      "percent": 91.8
+    }
+  ],
+  "generated_at": 1791298319.9977994
+}

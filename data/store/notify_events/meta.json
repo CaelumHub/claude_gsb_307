@@ -1,0 +1,8 @@
+{
+  "name": "notify_events",
+  "shard_size": 200,
+  "shard_count": 1,
+  "total": 3,
+  "next_id": 4,
+  "created_at": 1791298319.276307
+}

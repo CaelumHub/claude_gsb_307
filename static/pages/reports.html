@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>测试报告 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .build-item { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 8px;
+      cursor: pointer; transition: all .12s; }
+    .build-item:hover { border-color: var(--primary); }
+    .build-item.active { border-color: var(--primary); background: var(--primary-soft); }
+    .build-list { max-height: 560px; overflow: auto; }
+    .trend { display: flex; align-items: flex-end; gap: 6px; height: 120px; padding: 10px 0; }
+    .trend .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+    .trend .col .bar-v { width: 100%; max-width: 40px; border-radius: 5px 5px 0 0; }
+    .trend .col .lbl { font-size: 10px; color: var(--text-muted); transform: rotate(0); white-space: nowrap; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">测试报告</h1>
+    <p class="page-desc">查看每次构建的通过率、耗时、分组与失败明细，以及跨构建趋势。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn secondary" id="btn-refresh">刷新</button>
+      </div>
+    </div>
+
+    <!-- 项目趋势 -->
+    <section class="card">
+      <h2>通过率趋势</h2>
+      <div id="trend"><div class="empty">加载中…</div></div>
+    </section>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>构建列表</h2>
+        <div class="build-list" id="build-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card">
+        <h2 style="margin:0" id="report-title">报告详情</h2>
+        <div id="report-body"><div class="empty">请选择左侧构建</div></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("reports");
+
+let projectId = null;
+let builds = [];
+let currentBuild = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadAll();
+  if (builds[0]) selectBuild(builds[0].id);
+}
+
+async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
+
+async function loadAll() {
+  if (!projectId) return;
+  await Promise.all([loadTrend(), loadBuilds()]);
+}
+
+async function loadTrend() {
+  const d = await api(`/api/projects/${projectId}/reports?limit=15`);
+  const pts = d.builds || [];
+  const host = $("#trend");
+  if (!pts.length) { host.innerHTML = '<div class="empty">暂无构建记录</div>'; return; }
+  const maxH = 96;
+  host.innerHTML = `<div class="trend">` + pts.map(p => `
+    <div class="col" title="${esc(p.name)} · ${p.pass_rate}%">
+      <span class="muted" style="font-size:10px">${Math.round(p.pass_rate)}%</span>
+      <div class="bar-v" style="height:${Math.max(3, p.pass_rate/100*maxH)}px;background:${p.pass_rate>=90?'var(--green)':p.pass_rate>=60?'var(--amber)':'var(--red)'}"></div>
+      <span class="lbl">${(p.name||p.build_id).slice(-8)}</span>
+    </div>`).join("") + "</div>";
+  const agg = d.aggregate || {};
+  host.insertAdjacentHTML("beforeend", `<div class="mt muted" style="font-size:13px">最近 ${agg.total_builds} 次构建 ·
+    平均通过率 <strong>${agg.avg_pass_rate}%</strong> · 平均耗时 <strong>${fmtDur(agg.avg_duration)}</strong></div>`);
+}
+
+async function loadBuilds() {
+  const d = await api(`/api/builds?project_id=${projectId}`);
+  builds = d.builds || [];
+  const host = $("#build-list");
+  if (!builds.length) { host.innerHTML = '<div class="empty">暂无构建</div>'; return; }
+  host.innerHTML = builds.map(b => `
+    <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
+      <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
+      <div class="muted" style="font-size:12px">通过 ${b.passed||0}/${b.total||0} · ${fmtDur(b.duration)} · ${fmtTime(b.finished_at)}</div>
+    </div>`).join("");
+}
+
+async function selectBuild(id) {
+  currentBuild = id;
+  loadBuilds();
+  const r = await api(`/api/builds/${id}/report`);
+  renderReport(r);
+}
+
+function renderReport(r) {
+  $("#report-title").textContent = r.name || r.build_id;
+  const s = r.summary || {};
+  const d = r.durations || {};
+  const groups = Object.entries(r.by_group || {});
+  const prio = Object.entries(r.by_priority || {});
+  const failures = r.failures || [];
+  const slowest = r.slowest || [];
+
+  $("#report-body").innerHTML = `
+    <div class="grid cols-4 mt">
+      <div class="stat primary"><div class="v">${s.total||0}</div><div class="k">总用例</div></div>
+      <div class="stat good"><div class="v">${s.pass_rate ?? 0}%</div><div class="k">通过率</div></div>
+      <div class="stat ${(s.failed||0)?'bad':'good'}"><div class="v">${(s.failed||0)+(s.error||0)+(s.timeout||0)}</div><div class="k">失败/错误/超时</div></div>
+      <div class="stat primary"><div class="v">${fmtDur(r.duration)}</div><div class="k">总耗时</div></div>
+    </div>
+    <div class="mt row">
+      ${statusBadge(r.status)}
+      <span class="muted" style="font-size:13px">触发 ${esc(r.trigger||'manual')} · ${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</span>
+    </div>
+    <div class="mt grid cols-4">
+      <div class="stat"><div class="v">${fmtDur(d.avg)}</div><div class="k">平均耗时</div></div>
+      <div class="stat"><div class="v">${fmtDur(d.median)}</div><div class="k">中位耗时</div></div>
+      <div class="stat"><div class="v">${fmtDur(d.p95)}</div><div class="k">P95</div></div>
+      <div class="stat"><div class="v">${fmtDur(d.max)}</div><div class="k">最慢</div></div>
+    </div>
+
+    ${groups.length ? `<div class="mt"><h3>按分组</h3><table>
+      <thead><tr><th>分组</th><th>总数</th><th>通过</th><th>失败</th><th>通过率</th><th>耗时</th></tr></thead>
+      <tbody>${groups.map(([g,v]) => `<tr><td><span class="tag">${esc(g)}</span></td><td>${v.total}</td><td style="color:var(--green)">${v.passed}</td>
+        <td style="color:var(--red)">${(v.failed||0)+(v.error||0)+(v.timeout||0)}</td>
+        <td>${v.total?Math.round(v.passed/v.total*100):0}%</td><td>${fmtDur(v.duration)}</td></tr>`).join("")}
+      </tbody></table></div>` : ""}
+
+    ${prio.length ? `<div class="mt"><h3>按优先级</h3><table>
+      <thead><tr><th>优先级</th><th>总数</th><th>通过</th><th>失败</th></tr></thead>
+      <tbody>${prio.map(([g,v]) => `<tr><td>${priorityBadge(g)}</td><td>${v.total}</td><td style="color:var(--green)">${v.passed}</td>
+        <td style="color:var(--red)">${(v.failed||0)+(v.error||0)+(v.timeout||0)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+
+    ${failures.length ? `<div class="mt"><h3>失败明细</h3><table>
+      <thead><tr><th>用例</th><th>状态</th><th>原因</th><th>耗时</th></tr></thead>
+      <tbody>${failures.map(f => `<tr><td>${esc(f.case_name||f.case_id)}</td><td>${statusBadge(f.status)}</td>
+        <td class="muted" style="font-size:13px">${esc(f.reason||"")}</td><td>${fmtDur(f.duration)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+
+    ${slowest.length ? `<div class="mt"><h3>最慢用例</h3><table>
+      <thead><tr><th>用例</th><th>分组</th><th>状态</th><th>耗时</th></tr></thead>
+      <tbody>${slowest.map(x => `<tr><td>${esc(x.case_name||x.case_id)}</td><td><span class="tag">${esc(x.group)}</span></td>
+        <td>${statusBadge(x.status)}</td><td>${fmtDur(x.duration)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+}
+
+$("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };
+
+init();
+</script>
+</body>
+</html>

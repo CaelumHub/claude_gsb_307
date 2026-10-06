@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>代码覆盖率 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .build-item { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; margin-bottom: 8px;
+      cursor: pointer; transition: all .12s; }
+    .build-item:hover { border-color: var(--primary); }
+    .build-item.active { border-color: var(--primary); background: var(--primary-soft); }
+    .build-list { max-height: 520px; overflow: auto; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">代码覆盖率</h1>
+    <p class="page-desc">按构建查看模拟源码树的覆盖率，覆盖率与通过率弱相关、同一构建结果稳定。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn secondary" id="btn-refresh">刷新</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>构建列表</h2>
+        <div class="build-list" id="build-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card">
+        <h2 style="margin:0" id="cov-title">覆盖率详情</h2>
+        <div id="cov-body"><div class="empty">请选择左侧构建</div></div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>覆盖率趋势</h2>
+      <div id="trend"><div class="empty">加载中…</div></div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("coverage");
+
+let projectId = null;
+let builds = [];
+let currentBuild = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadAll();
+  if (builds[0]) selectBuild(builds[0].id);
+}
+
+async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
+
+async function loadAll() {
+  if (!projectId) return;
+  await Promise.all([loadBuilds(), loadTrend()]);
+}
+
+async function loadBuilds() {
+  const d = await api(`/api/builds?project_id=${projectId}`);
+  builds = d.builds || [];
+  const host = $("#build-list");
+  if (!builds.length) { host.innerHTML = '<div class="empty">暂无构建，先执行一次测试。</div>'; return; }
+  host.innerHTML = builds.map(b => `
+    <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
+      <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
+      <div class="muted" style="font-size:12px">通过率 ${b.total?Math.round(b.passed/b.total*100):0}% · ${fmtTime(b.finished_at)}</div>
+    </div>`).join("");
+}
+
+async function loadTrend() {
+  const d = await api(`/api/projects/${projectId}/coverage/trend`);
+  const pts = d.points || [];
+  const host = $("#trend");
+  if (!pts.length) { host.innerHTML = '<div class="empty">暂无覆盖率数据</div>'; return; }
+  host.innerHTML = `<table><thead><tr><th>构建</th><th>状态</th><th>覆盖率</th><th>通过率</th></tr></thead><tbody>` +
+    pts.map(p => `<tr><td class="mono" style="font-size:12px">${esc(p.name||p.build_id)}</td>
+      <td>${statusBadge(p.status)}</td><td><strong>${p.percent}%</strong></td>
+      <td>${Math.round(p.passed_ratio*100)}%</td></tr>`).join("") + "</tbody></table>";
+}
+
+async function selectBuild(id) {
+  currentBuild = id;
+  loadBuilds();
+  const c = await api(`/api/builds/${id}/coverage`);
+  renderCoverage(c);
+}
+
+function renderCoverage(c) {
+  $("#cov-title").textContent = `覆盖率详情 · ${c.percent}%`;
+  const files = c.files || [];
+  $("#cov-body").innerHTML = `
+    <div class="grid cols-3 mt">
+      <div class="stat primary"><div class="v">${c.percent}%</div><div class="k">总体覆盖率</div></div>
+      <div class="stat good"><div class="v">${c.covered_lines}</div><div class="k">覆盖行</div></div>
+      <div class="stat bad"><div class="v">${c.missed_lines}</div><div class="k">未覆盖行</div></div>
+    </div>
+    <div class="mt">${files.map(f => `
+      <div class="cov-row">
+        <span class="fname" title="${esc(f.file)}">${esc(f.file)}</span>
+        <div class="bar ${f.percent>=80?'green':f.percent>=50?'amber':'red'}"><i style="width:${f.percent}%"></i></div>
+        <span class="pct">${f.percent}%</span>
+      </div>`).join("")}</div>
+    <div class="mt muted" style="font-size:12px">模拟源码树 · 共 ${c.total_lines} 行，覆盖 ${c.covered_lines} 行。</div>`;
+}
+
+$("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };
+
+init();
+</script>
+</body>
+</html>

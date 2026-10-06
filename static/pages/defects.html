@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>缺陷跟踪 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .defect-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
+    .sev-blocker, .sev-critical { background:#fdecec; color:var(--red); }
+    .sev-major { background:#fef3e2; color:var(--amber); }
+    .sev-minor, .sev-trivial { background:#f1f5f9; color:#64748b; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">缺陷跟踪</h1>
+    <p class="page-desc">管理测试发现的缺陷，维护状态流转，支持关联来源用例与构建。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <select id="status-filter" style="max-width:140px" onchange="loadDefects()">
+          <option value="">全部状态</option><option>open</option><option>in_progress</option>
+          <option>fixed</option><option>verified</option><option>closed</option><option>reopened</option>
+        </select>
+        <select id="sev-filter" style="max-width:140px" onchange="loadDefects()">
+          <option value="">全部级别</option><option>blocker</option><option>critical</option>
+          <option>major</option><option>minor</option><option>trivial</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" id="btn-new">新建缺陷</button>
+      </div>
+    </div>
+
+    <div class="card" id="stats"><div class="empty">加载中…</div></div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>缺陷列表</h2>
+        <div id="defect-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card" id="edit-card">
+        <h2 id="edit-title">新建缺陷</h2>
+        <div class="mt"><label>标题 *</label><input type="text" id="d-title"></div>
+        <div class="grid cols-2 mt">
+          <div><label>严重级别</label><select id="d-sev">
+            <option>blocker</option><option>critical</option><option selected>major</option><option>minor</option><option>trivial</option></select></div>
+          <div><label>指派给</label><input type="text" id="d-assignee" placeholder="qa / 开发者"></div>
+        </div>
+        <div class="mt"><label>描述</label><textarea id="d-desc" style="min-height:100px"></textarea></div>
+        <div class="row mt">
+          <button class="btn" id="btn-save">保存</button>
+          <button class="btn secondary" id="btn-cancel">取消</button>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("defects");
+
+let projectId = null;
+let editingId = null;
+const STATUS_OPTIONS = ["open","in_progress","fixed","verified","closed","reopened"];
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await refresh();
+}
+
+async function switchProject(id) { projectId = id; editingId = null; await refresh(); }
+
+async function refresh() { await Promise.all([loadDefects(), loadStats()]); }
+
+async function loadStats() {
+  const d = await api(`/api/projects/${projectId}/defects/stats`);
+  const bs = d.by_status || {}, bv = d.by_severity || {};
+  $("#stats").innerHTML = `
+    <div class="grid cols-4">
+      <div class="stat primary"><div class="v">${d.total}</div><div class="k">缺陷总数</div></div>
+      <div class="stat bad"><div class="v">${bs.open||0}</div><div class="k">待处理</div></div>
+      <div class="stat good"><div class="v">${(bs.fixed||0)+(bs.verified||0)+(bs.closed||0)}</div><div class="k">已解决</div></div>
+      <div class="stat primary"><div class="v">${(bv.blocker||0)+(bv.critical||0)}</div><div class="k">阻断/严重</div></div>
+    </div>`;
+}
+
+async function loadDefects() {
+  const st = encodeURIComponent($("#status-filter").value);
+  const sv = encodeURIComponent($("#sev-filter").value);
+  const d = await api(`/api/projects/${projectId}/defects?status=${st}&severity=${sv}`);
+  const defects = d.defects || [];
+  const host = $("#defect-list");
+  if (!defects.length) { host.innerHTML = '<div class="empty">暂无缺陷</div>'; return; }
+  host.innerHTML = defects.map(x => `
+    <div class="defect-item">
+      <div class="row spread">
+        <div class="row"><span class="badge sev-${x.severity}">${esc(x.severity)}</span><strong>${esc(x.title)}</strong></div>
+        <span class="badge ${x.status}">${esc(x.status)}</span>
+      </div>
+      <div class="muted mt" style="font-size:13px">${esc(x.description||"")}</div>
+      <div class="mt" style="font-size:12px;color:var(--text-muted)">
+        ${x.assignee?`指派: ${esc(x.assignee)} · `:""}${x.source_case_id?`来源用例: <span class="mono">${esc(x.source_case_id)}</span> · `:""}
+        创建 ${fmtTime(x.created_at)}
+      </div>
+      <div class="row mt" style="gap:6px">
+        <select onchange="changeStatus('${x.id}', this.value)" style="max-width:150px">
+          ${STATUS_OPTIONS.map(s => `<option ${s===x.status?'selected':''}>${s}</option>`).join("")}
+        </select>
+        <button class="btn small secondary" onclick="editDefect('${x.id}')">编辑</button>
+        <button class="btn small danger" onclick="delDefect('${x.id}')">删除</button>
+      </div>
+    </div>`).join("");
+}
+
+async function changeStatus(id, status) {
+  await api(`/api/defects/${id}`, { method: "PUT", body: { status } });
+  toast("状态已更新");
+  refresh();
+}
+
+function newDefect() {
+  editingId = null;
+  $("#edit-title").textContent = "新建缺陷";
+  $("#d-title").value = ""; $("#d-desc").value = ""; $("#d-assignee").value = ""; $("#d-sev").value = "major";
+}
+
+function editDefect(id) {
+  editingId = id;
+  $("#edit-title").textContent = "编辑缺陷";
+  api(`/api/defects/${id}`).then(x => {
+    $("#d-title").value = x.title || ""; $("#d-desc").value = x.description || "";
+    $("#d-assignee").value = x.assignee || ""; $("#d-sev").value = x.severity || "major";
+  });
+}
+
+async function delDefect(id) {
+  if (!confirm("确认删除该缺陷？")) return;
+  await api(`/api/defects/${id}`, { method: "DELETE" });
+  toast("已删除");
+  refresh();
+}
+
+$("#btn-new").onclick = newDefect;
+$("#btn-cancel").onclick = () => { editingId = null; };
+
+$("#btn-save").onclick = async () => {
+  const title = $("#d-title").value.trim();
+  if (!title) return toast("请输入缺陷标题", "error");
+  const body = { title, description: $("#d-desc").value, severity: $("#d-sev").value,
+    assignee: $("#d-assignee").value };
+  if (editingId) {
+    await api(`/api/defects/${editingId}`, { method: "PUT", body });
+    toast("已保存");
+  } else {
+    await api(`/api/projects/${projectId}/defects`, { method: "POST", body });
+    toast("已创建");
+  }
+  newDefect(); refresh();
+};
+
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,65 @@
+[
+  {
+    "id": "evt_1791298319998_244734",
+    "project_id": "proj_1791298319304_0e434a",
+    "integration_id": "int_1791298319332_4e32a7",
+    "integration_name": "CI Webhook",
+    "type": "webhook",
+    "event": "build.finished",
+    "status": "delivered",
+    "recipient": "https://example.com/hooks/ci",
+    "latency_ms": 73,
+    "payload": {
+      "build_id": "build_1791298319336_efd70a",
+      "project_id": "proj_1791298319304_0e434a",
+      "status": "failed",
+      "passed": 6,
+      "total": 8,
+      "pass_rate": 75.0,
+      "duration": 0.653
+    },
+    "created_at": 1791298319.99901
+  },
+  {
+    "id": "evt_1791298320000_3fa1fa",
+    "project_id": "proj_1791298319304_0e434a",
+    "integration_id": "int_1791298319332_4e32a7",
+    "integration_name": "CI Webhook",
+    "type": "webhook",
+    "event": "build.failed",
+    "status": "delivered",
+    "recipient": "https://example.com/hooks/ci",
+    "latency_ms": 76,
+    "payload": {
+      "build_id": "build_1791298319336_efd70a",
+      "project_id": "proj_1791298319304_0e434a",
+      "status": "failed",
+      "passed": 6,
+      "total": 8,
+      "pass_rate": 75.0,
+      "duration": 0.653
+    },
+    "created_at": 1791298320.0009904
+  },
+  {
+    "id": "evt_1791298320003_b52e6c",
+    "project_id": "proj_1791298319304_0e434a",
+    "integration_id": "int_1791298319334_34d0ad",
+    "integration_name": "团队邮件",
+    "type": "email",
+    "event": "build.failed",
+    "status": "delivered",
+    "recipient": "qa@example.com",
+    "latency_ms": 42,
+    "payload": {
+      "build_id": "build_1791298319336_efd70a",
+      "project_id": "proj_1791298319304_0e434a",
+      "status": "failed",
+      "passed": 6,
+      "total": 8,
+      "pass_rate": 75.0,
+      "duration": 0.653
+    },
+    "created_at": 1791298320.0031557
+  }
+]

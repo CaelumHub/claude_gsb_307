@@ -1,0 +1,31 @@
+[
+  {
+    "id": "int_1791298319332_4e32a7",
+    "project_id": "proj_1791298319304_0e434a",
+    "type": "webhook",
+    "name": "CI Webhook",
+    "enabled": true,
+    "config": {
+      "url": "https://example.com/hooks/ci"
+    },
+    "events": [
+      "build.finished",
+      "build.failed"
+    ],
+    "created_at": 1791298319.332953
+  },
+  {
+    "id": "int_1791298319334_34d0ad",
+    "project_id": "proj_1791298319304_0e434a",
+    "type": "email",
+    "name": "团队邮件",
+    "enabled": true,
+    "config": {
+      "address": "qa@example.com"
+    },
+    "events": [
+      "build.failed"
+    ],
+    "created_at": 1791298319.334712
+  }
+]

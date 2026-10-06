@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>测试套件与分组 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .suite-item { border: 1px solid var(--border); border-radius: 9px; padding: 14px 16px; margin-bottom: 10px; }
+    .case-chip { display: inline-block; padding: 2px 9px; border-radius: 6px; background: var(--surface-2);
+      border: 1px solid var(--border); font-size: 12px; margin: 2px; }
+    .case-pick { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+    .case-pick label { display: block; font-weight: 400; color: var(--text); font-size: 14px; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">测试套件与分组</h1>
+    <p class="page-desc">把用例组织成套件，按标签分组；套件可直接触发执行。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:260px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn" id="btn-new">新建套件</button>
+      </div>
+    </div>
+
+    <div class="grid cols-3">
+      <section class="card">
+        <h2>分组</h2>
+        <div id="groups"><div class="empty">加载中…</div></div>
+      </section>
+      <section class="card" style="grid-column: span 2">
+        <h2>套件列表</h2>
+        <div id="suite-list"><div class="empty">加载中…</div></div>
+      </section>
+    </div>
+
+    <!-- 新建/编辑套件弹层 -->
+    <section class="card" id="edit-card" style="display:none">
+      <h2 id="edit-title">新建套件</h2>
+      <div class="grid cols-2">
+        <div><label>套件名称 *</label><input type="text" id="s-name"></div>
+        <div><label>分组</label><input type="text" id="s-group" placeholder="smoke / regression"></div>
+      </div>
+      <div class="mt"><label>描述</label><textarea id="s-desc" style="min-height:52px"></textarea></div>
+      <div class="grid cols-2 mt">
+        <div><label>执行环境</label><select id="s-env"><option value="">— 默认 —</option></select></div>
+        <div><label>选择用例</label></div>
+      </div>
+      <div class="case-pick mt" id="case-pick"><div class="muted">加载用例…</div></div>
+      <div class="row mt">
+        <button class="btn" id="btn-save">保存</button>
+        <button class="btn secondary" id="btn-cancel">取消</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("suites");
+
+let projectId = null;
+let suites = [];
+let allCases = [];
+let editingId = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadAll();
+}
+
+async function switchProject(id) { projectId = id; editingId = null; $("#edit-card").style.display = "none"; await loadAll(); }
+
+async function loadAll() {
+  if (!projectId) return;
+  await Promise.all([loadSuites(), loadGroups(), loadCases(), loadEnvs()]);
+}
+
+async function loadSuites() {
+  const d = await api(`/api/projects/${projectId}/suites`);
+  suites = d.suites || [];
+  const host = $("#suite-list");
+  if (!suites.length) { host.innerHTML = '<div class="empty">还没有套件，点击「新建套件」。</div>'; return; }
+  host.innerHTML = suites.map(s => `
+    <div class="suite-item">
+      <div class="row spread">
+        <div class="row">
+          <strong>${esc(s.name)}</strong>
+          ${s.group ? `<span class="tag">${esc(s.group)}</span>` : ""}
+          <span class="muted" style="font-size:13px">${s.case_count} 个用例</span>
+        </div>
+        <div class="row">
+          <button class="btn small" onclick="runSuite('${s.id}')">▶ 执行</button>
+          <button class="btn small secondary" onclick="editSuite('${s.id}')">编辑</button>
+          <button class="btn small danger" onclick="delSuite('${s.id}')">删除</button>
+        </div>
+      </div>
+      <div class="mt" style="font-size:13px">${(s.cases||[]).map(c => `<span class="case-chip">${esc(c.name)}</span>`).join("") || '<span class="muted">暂无用例</span>'}</div>
+    </div>`).join("");
+}
+
+async function loadGroups() {
+  const d = await api(`/api/projects/${projectId}/groups`);
+  const groups = d.groups || [];
+  $("#groups").innerHTML = groups.length
+    ? groups.map(g => `<div class="row spread" style="padding:6px 0;border-bottom:1px solid var(--border)">
+        <span class="tag">${esc(g.name)}</span><span class="muted">${g.count} 用例</span></div>`).join("")
+    : '<div class="empty">暂无分组</div>';
+}
+
+async function loadCases() {
+  const d = await api(`/api/projects/${projectId}/cases`);
+  allCases = d.cases || [];
+}
+
+async function loadEnvs() {
+  const d = await api(`/api/projects/${projectId}/environments`);
+  const envs = d.environments || [];
+  $("#s-env").innerHTML = '<option value="">— 默认 —</option>' +
+    envs.map(e => `<option value="${e.id}">${esc(e.name)}</option>`).join("");
+}
+
+function renderCasePick(selectedIds) {
+  const sel = new Set(selectedIds || []);
+  $("#case-pick").innerHTML = allCases.length
+    ? allCases.map(c => `<label><input type="checkbox" class="pick" value="${c.id}" ${sel.has(c.id)?"checked":""}
+        style="width:auto;margin-right:8px">${esc(c.name)}
+        <span class="muted" style="font-size:12px">${priorityBadge(c.priority)}</span></label>`).join("")
+    : '<div class="muted">暂无用例</div>';
+}
+
+async function runSuite(id) {
+  const btn = event.target;
+  setLoading(btn, true, "提交中…");
+  try {
+    const r = await api(`/api/suites/${id}/run`, { method: "POST", body: { trigger: "manual" } });
+    toast(`已提交构建 ${r.id}`);
+  } catch (e) { toast(e.message, "error"); }
+  setLoading(btn, false);
+}
+
+function newSuite() {
+  editingId = null;
+  $("#edit-title").textContent = "新建套件";
+  $("#s-name").value = ""; $("#s-desc").value = ""; $("#s-group").value = "";
+  $("#s-env").value = "";
+  renderCasePick([]);
+  $("#edit-card").style.display = "block";
+}
+
+function editSuite(id) {
+  const s = suites.find(x => x.id === id);
+  if (!s) return;
+  editingId = id;
+  $("#edit-title").textContent = "编辑套件";
+  $("#s-name").value = s.name || ""; $("#s-desc").value = s.description || "";
+  $("#s-group").value = s.group || ""; $("#s-env").value = s.env_id || "";
+  renderCasePick(s.case_ids || []);
+  $("#edit-card").style.display = "block";
+}
+
+async function delSuite(id) {
+  if (!confirm("确认删除该套件？")) return;
+  await api(`/api/suites/${id}`, { method: "DELETE" });
+  toast("已删除");
+  loadSuites();
+}
+
+$("#btn-new").onclick = newSuite;
+$("#btn-cancel").onclick = () => { $("#edit-card").style.display = "none"; };
+
+$("#btn-save").onclick = async () => {
+  const name = $("#s-name").value.trim();
+  if (!name) return toast("请输入套件名称", "error");
+  const caseIds = $$(".pick").filter(c => c.checked).map(c => c.value);
+  const body = { name, description: $("#s-desc").value, group: $("#s-group").value,
+    env_id: $("#s-env").value || null, case_ids: caseIds };
+  if (editingId) {
+    await api(`/api/suites/${editingId}`, { method: "PUT", body });
+    toast("已保存");
+  } else {
+    await api(`/api/projects/${projectId}/suites`, { method: "POST", body });
+    toast("已创建");
+  }
+  $("#edit-card").style.display = "none";
+  loadSuites();
+};
+
+init();
+</script>
+</body>
+</html>

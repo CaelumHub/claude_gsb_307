@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>环境管理 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .env-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
+    .dep-line { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; font-size: 13px; }
+    .dep-line input { flex: 1; }
+    .dep-line input.narrow { max-width: 130px; }
+    .vars-box { font-family: var(--mono); font-size: 12.5px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">环境管理</h1>
+    <p class="page-desc">维护测试环境：运行配置、依赖清单与变量，不同环境之间隔离。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn" id="btn-new">新建环境</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>环境列表</h2>
+        <div id="env-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card" id="edit-card">
+        <h2 id="edit-title">新建环境</h2>
+        <div class="grid cols-2">
+          <div><label>名称 *</label><input type="text" id="e-name" placeholder="dev / staging"></div>
+          <div><label>描述</label><input type="text" id="e-desc"></div>
+        </div>
+        <div class="grid cols-2 mt">
+          <div><label>Python 版本</label><select id="e-py"><option>3.11</option><option>3.10</option><option>3.12</option><option>3.9</option></select></div>
+          <div><label>基础镜像</label><input type="text" id="e-image" value="python:3.11-slim"></div>
+        </div>
+        <div class="grid cols-3 mt">
+          <div><label>base_url</label><input type="text" id="e-url" value="http://mock.local"></div>
+          <div><label>延迟(ms)</label><input type="number" id="e-latency" value="20"></div>
+          <div><label>失败率(0~1)</label><input type="text" id="e-fail" value="0.0"></div>
+        </div>
+        <div class="mt"><label>环境变量（JSON）</label>
+          <textarea id="e-vars" class="vars-box" style="min-height:64px">{"REGION":"dev"}</textarea></div>
+        <div class="mt">
+          <label>依赖清单</label>
+          <div id="dep-list"></div>
+          <button class="btn secondary small" id="btn-add-dep">+ 添加依赖</button>
+        </div>
+        <div class="row mt">
+          <button class="btn" id="btn-save">保存</button>
+          <button class="btn secondary" id="btn-cancel">取消</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="card" id="resolve-card" style="display:none">
+      <h2 id="resolve-title">依赖解析</h2>
+      <div id="resolve-body"></div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("environments");
+
+let projectId = null;
+let envs = [];
+let editingId = null;
+let deps = [];
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadEnvs();
+}
+
+async function switchProject(id) { projectId = id; editingId = null; $("#edit-card").style.display=""; $("#resolve-card").style.display="none"; await loadEnvs(); }
+
+async function loadEnvs() {
+  if (!projectId) return;
+  const d = await api(`/api/projects/${projectId}/environments`);
+  envs = d.environments || [];
+  const host = $("#env-list");
+  if (!envs.length) { host.innerHTML = '<div class="empty">还没有环境，点击「新建环境」。</div>'; return; }
+  host.innerHTML = envs.map(e => `
+    <div class="env-item">
+      <div class="row spread">
+        <div class="row"><strong>${esc(e.name)}</strong>
+          <span class="muted mono" style="font-size:12px">${esc(e.python_version)} · ${esc(e.base_image)}</span></div>
+        <div class="row">
+          <button class="btn small secondary" onclick="resolve('${e.id}')">解析依赖</button>
+          <button class="btn small secondary" onclick="editEnv('${e.id}')">编辑</button>
+          <button class="btn small danger" onclick="delEnv('${e.id}')">删除</button>
+        </div>
+      </div>
+      <div class="mt muted" style="font-size:13px">${(e.dependencies||[]).length} 个依赖 ·
+        延迟 ${(e.config||{}).latency_ms||0}ms · 失败率 ${(e.config||{}).fail_rate||0}</div>
+      <div class="mt" style="font-size:12px">${Object.entries(e.variables||{}).map(([k,v]) => `<span class="tag">${esc(k)}=${esc(v)}</span>`).join("")}</div>
+    </div>`).join("");
+}
+
+function renderDeps() {
+  const host = $("#dep-list");
+  if (!deps.length) { host.innerHTML = '<div class="muted">暂无依赖</div>'; return; }
+  host.innerHTML = deps.map((d, i) => `
+    <div class="dep-line">
+      <input type="text" value="${esc(d.name)}" placeholder="包名，如 requests" oninput="deps[${i}].name=this.value">
+      <input type="text" class="narrow" value="${esc(d.constraint||'*')}" placeholder=">=2.0" oninput="deps[${i}].constraint=this.value">
+      <button class="btn danger small" onclick="deps.splice(${i},1);renderDeps()">删除</button>
+    </div>`).join("");
+}
+
+$("#btn-add-dep").onclick = () => { deps.push({ name: "", constraint: "*" }); renderDeps(); };
+
+function newEnv() {
+  editingId = null;
+  $("#edit-title").textContent = "新建环境";
+  $("#e-name").value = ""; $("#e-desc").value = ""; $("#e-py").value = "3.11";
+  $("#e-image").value = "python:3.11-slim"; $("#e-url").value = "http://mock.local";
+  $("#e-latency").value = "20"; $("#e-fail").value = "0.0";
+  $("#e-vars").value = '{"REGION":"dev"}';
+  deps = []; renderDeps();
+}
+
+function editEnv(id) {
+  const e = envs.find(x => x.id === id);
+  if (!e) return;
+  editingId = id;
+  $("#edit-title").textContent = "编辑环境";
+  $("#e-name").value = e.name || ""; $("#e-desc").value = e.description || "";
+  $("#e-py").value = e.python_version || "3.11"; $("#e-image").value = e.base_image || "";
+  $("#e-url").value = (e.config||{}).base_url || "http://mock.local";
+  $("#e-latency").value = (e.config||{}).latency_ms ?? 20;
+  $("#e-fail").value = (e.config||{}).fail_rate ?? 0;
+  $("#e-vars").value = JSON.stringify(e.variables || {}, null, 1);
+  deps = (e.dependencies || []).map(d => ({ ...d })); renderDeps();
+}
+
+async function delEnv(id) {
+  if (!confirm("确认删除该环境？")) return;
+  await api(`/api/environments/${id}`, { method: "DELETE" });
+  toast("已删除");
+  loadEnvs();
+}
+
+async function resolve(id) {
+  const r = await api(`/api/environments/${id}/resolve`);
+  $("#resolve-title").textContent = `依赖解析 · ${envs.find(e=>e.id===id)?.name||""}`;
+  $("#resolve-body").innerHTML = `<div class="row"><span class="badge ${r.ok?'ok':'error'}">${r.ok?'解析成功':'存在冲突'}</span>
+    <span class="muted" style="font-size:13px">${r.resolved_count} 解析成功 / ${r.conflict_count} 冲突</span></div>
+    <table class="mt"><thead><tr><th>包</th><th>约束</th><th>解析版本</th><th>最新</th><th>状态</th></tr></thead><tbody>` +
+    (r.dependencies||[]).map(d => `<tr><td class="mono">${esc(d.name)}</td><td>${esc(d.constraint)}</td>
+      <td class="mono">${esc(d.resolved||"—")}</td><td class="mono muted">${esc(d.latest||"—")}</td>
+      <td><span class="badge ${d.status==='resolved'?'ok':d.status==='conflict'?'error':'pending'}">${esc(d.status)}</span></td></tr>`).join("") +
+    "</tbody></table>";
+  $("#resolve-card").style.display = "block";
+}
+
+$("#btn-new").onclick = newEnv;
+$("#btn-cancel").onclick = () => { editingId = null; };
+
+$("#btn-save").onclick = async () => {
+  const name = $("#e-name").value.trim();
+  if (!name) return toast("请输入环境名称", "error");
+  let vars = {};
+  try { vars = JSON.parse($("#e-vars").value || "{}"); } catch (_) { return toast("环境变量不是合法 JSON", "error"); }
+  const body = {
+    name, description: $("#e-desc").value, python_version: $("#e-py").value,
+    base_image: $("#e-image").value,
+    variables: vars,
+    dependencies: deps.filter(d => d.name.trim()).map(d => ({ name: d.name.trim(), constraint: d.constraint || "*" })),
+    config: { base_url: $("#e-url").value, latency_ms: parseInt($("#e-latency").value||"0",10),
+      fail_rate: parseFloat($("#e-fail").value||"0") },
+  };
+  if (editingId) {
+    await api(`/api/environments/${editingId}`, { method: "PUT", body });
+    toast("已保存");
+  } else {
+    await api(`/api/projects/${projectId}/environments`, { method: "POST", body });
+    toast("已创建");
+  }
+  loadEnvs();
+};
+
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,266 @@
+[
+  {
+    "id": "case_1791298319311_638fc4",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "健康检查接口",
+    "description": "演示用例",
+    "priority": "P0",
+    "tags": [
+      "smoke",
+      "api"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "request",
+        "method": "GET",
+        "url": "/api/health",
+        "name": "请求健康检查"
+      },
+      {
+        "action": "assert",
+        "type": "status",
+        "actual": "${resp.status}",
+        "expected": 200,
+        "name": "状态码 200"
+      },
+      {
+        "action": "assert",
+        "type": "truthy",
+        "actual": "${resp.body.ok}",
+        "expected": true,
+        "name": "返回 ok"
+      }
+    ],
+    "created_at": 1791298319.3116422
+  },
+  {
+    "id": "case_1791298319313_2f0f95",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "登录接口",
+    "description": "演示用例",
+    "priority": "P0",
+    "tags": [
+      "smoke",
+      "auth"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "set",
+        "key": "user",
+        "value": "admin",
+        "name": "准备用户名"
+      },
+      {
+        "action": "request",
+        "method": "POST",
+        "url": "/api/login",
+        "name": "请求登录"
+      },
+      {
+        "action": "assert",
+        "type": "status",
+        "actual": "${resp.status}",
+        "expected": 200,
+        "name": "登录成功"
+      },
+      {
+        "action": "assert",
+        "type": "contains",
+        "actual": "${resp.body}",
+        "expected": "ok",
+        "name": "返回体含 ok"
+      }
+    ],
+    "created_at": 1791298319.3135176
+  },
+  {
+    "id": "case_1791298319315_9c3e18",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "用户列表查询",
+    "description": "演示用例",
+    "priority": "P1",
+    "tags": [
+      "api",
+      "users"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "request",
+        "method": "GET",
+        "url": "/api/users",
+        "name": "查询用户列表"
+      },
+      {
+        "action": "script",
+        "expr": "len([1,2,3])",
+        "save_as": "count",
+        "name": "计算数量"
+      },
+      {
+        "action": "assert",
+        "type": "gte",
+        "actual": "${count}",
+        "expected": 3,
+        "name": "数量 >= 3"
+      }
+    ],
+    "created_at": 1791298319.3155813
+  },
+  {
+    "id": "case_1791298319317_133b92",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "创建项目",
+    "description": "演示用例",
+    "priority": "P1",
+    "tags": [
+      "api",
+      "projects"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "request",
+        "method": "POST",
+        "url": "/api/projects",
+        "name": "创建项目"
+      },
+      {
+        "action": "assert",
+        "type": "status",
+        "actual": "${resp.status}",
+        "expected": 200,
+        "name": "状态码 200"
+      }
+    ],
+    "created_at": 1791298319.3175201
+  },
+  {
+    "id": "case_1791298319319_d4b19e",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "慢接口（性能）",
+    "description": "演示用例",
+    "priority": "P2",
+    "tags": [
+      "perf"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "request",
+        "method": "GET",
+        "url": "/api/slow",
+        "name": "请求慢接口"
+      },
+      {
+        "action": "assert",
+        "type": "status",
+        "actual": "${resp.status}",
+        "expected": 200,
+        "name": "状态码 200"
+      }
+    ],
+    "created_at": 1791298319.3194432
+  },
+  {
+    "id": "case_1791298319321_4a0c2f",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "失败注入接口",
+    "description": "演示用例",
+    "priority": "P2",
+    "tags": [
+      "chaos"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "request",
+        "method": "GET",
+        "url": "/api/error",
+        "name": "请求失败接口"
+      },
+      {
+        "action": "assert",
+        "type": "status",
+        "actual": "${resp.status}",
+        "expected": 200,
+        "name": "期望 200"
+      }
+    ],
+    "created_at": 1791298319.3213577
+  },
+  {
+    "id": "case_1791298319323_15490a",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "字符串断言",
+    "description": "演示用例",
+    "priority": "P2",
+    "tags": [
+      "unit"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "script",
+        "expr": "2 + 3 * 4",
+        "save_as": "result",
+        "name": "算术"
+      },
+      {
+        "action": "assert",
+        "type": "equals",
+        "actual": "${result}",
+        "expected": 14,
+        "name": "结果等于 14"
+      },
+      {
+        "action": "assert",
+        "type": "between",
+        "actual": "${result}",
+        "expected": [
+          10,
+          20
+        ],
+        "name": "结果在 10~20"
+      }
+    ],
+    "created_at": 1791298319.3233252
+  },
+  {
+    "id": "case_1791298319325_1ca4c8",
+    "project_id": "proj_1791298319304_0e434a",
+    "name": "正则断言",
+    "description": "演示用例",
+    "priority": "P3",
+    "tags": [
+      "unit"
+    ],
+    "timeout": 60,
+    "enabled": true,
+    "steps": [
+      {
+        "action": "set",
+        "key": "text",
+        "value": "release-2.31.0",
+        "name": "设置文本"
+      },
+      {
+        "action": "assert",
+        "type": "regex",
+        "actual": "${text}",
+        "expected": "^\\d+\\.\\d+",
+        "name": "匹配版本号"
+      }
+    ],
+    "created_at": 1791298319.325367
+  }
+]

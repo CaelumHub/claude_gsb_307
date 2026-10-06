@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>定时任务与触发 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .sch-item { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; margin-bottom: 10px; }
+    .cron-box { font-family: var(--mono); font-size: 13px; background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">定时任务与触发</h1>
+    <p class="page-desc">用 cron 表达式配置定时自动执行测试，到点触发、同一分钟不重复。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
+        <span style="flex:1"></span>
+        <button class="btn" id="btn-new">新建定时任务</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <section class="card">
+        <h2>任务列表</h2>
+        <div id="sch-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <section class="card" id="edit-card">
+        <h2 id="edit-title">新建定时任务</h2>
+        <div><label>名称</label><input type="text" id="s-name" placeholder="每晚回归"></div>
+        <div class="mt"><label>Cron 表达式（分 时 日 月 周）</label>
+          <input type="text" id="s-cron" value="*/10 * * * *" oninput="previewCron()" class="mono">
+          <div class="mt muted" id="cron-desc" style="font-size:13px"></div>
+          <div class="mt muted" style="font-size:12px">示例：<span class="mono">0 2 * * *</span> 每天 2 点 ·
+            <span class="mono">*/15 * * * *</span> 每 15 分钟 · <span class="mono">0 9 * * 1</span> 每周一 9 点</div>
+        </div>
+        <div class="grid cols-2 mt">
+          <div><label>目标套件</label><select id="s-suite"></select></div>
+          <div><label>执行环境</label><select id="s-env"><option value="">— 默认 —</option></select></div>
+        </div>
+        <div class="mt">
+          <label style="display:inline-flex;gap:6px;font-weight:400;color:var(--text);align-items:center">
+            <input type="checkbox" id="s-enabled" checked style="width:auto"> 启用
+          </label>
+        </div>
+        <div class="row mt">
+          <button class="btn" id="btn-save">保存</button>
+          <button class="btn secondary" id="btn-cancel">取消</button>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("schedules");
+
+let projectId = null;
+let schedules = [];
+let editingId = null;
+
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await Promise.all([loadSchedules(), loadRefs()]);
+}
+
+async function switchProject(id) { projectId = id; editingId = null; await Promise.all([loadSchedules(), loadRefs()]); }
+
+async function loadRefs() {
+  const [suites, envs] = await Promise.all([
+    api(`/api/projects/${projectId}/suites`),
+    api(`/api/projects/${projectId}/environments`),
+  ]);
+  $("#s-suite").innerHTML = '<option value="">— 选择套件 —</option>' +
+    (suites.suites||[]).map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join("");
+  $("#s-env").innerHTML = '<option value="">— 默认 —</option>' +
+    (envs.environments||[]).map(e => `<option value="${e.id}">${esc(e.name)}</option>`).join("");
+}
+
+async function loadSchedules() {
+  const d = await api(`/api/projects/${projectId}/schedules`);
+  schedules = d.schedules || [];
+  const host = $("#sch-list");
+  if (!schedules.length) { host.innerHTML = '<div class="empty">暂无定时任务</div>'; return; }
+  host.innerHTML = schedules.map(s => `
+    <div class="sch-item">
+      <div class="row spread">
+        <div class="row"><strong>${esc(s.name)}</strong>
+          <span class="badge ${s.enabled?'blue':'pending'}">${s.enabled?'已启用':'已停用'}</span></div>
+        <div class="row">
+          <button class="btn small secondary" onclick="toggle('${s.id}', ${!s.enabled})">${s.enabled?'停用':'启用'}</button>
+          <button class="btn small secondary" onclick="editSch('${s.id}')">编辑</button>
+          <button class="btn small danger" onclick="delSch('${s.id}')">删除</button>
+        </div>
+      </div>
+      <div class="cron-box mt">${esc(s.cron)}</div>
+      <div class="mt muted" style="font-size:13px">${esc(s.description||"")}</div>
+      <div class="mt" style="font-size:12px;color:var(--text-muted)">上次触发: ${s.last_fired_minute?esc(s.last_fired_minute):"—"} ·
+        最近执行: ${(s.recent_runs||[]).length} 次</div>
+    </div>`).join("");
+}
+
+function newSch() {
+  editingId = null;
+  $("#edit-title").textContent = "新建定时任务";
+  $("#s-name").value = ""; $("#s-cron").value = "*/10 * * * *"; $("#s-enabled").checked = true;
+  $("#s-suite").value = ""; $("#s-env").value = "";
+  previewCron();
+}
+
+function editSch(id) {
+  const s = schedules.find(x => x.id === id);
+  if (!s) return;
+  editingId = id;
+  $("#edit-title").textContent = "编辑定时任务";
+  $("#s-name").value = s.name || ""; $("#s-cron").value = s.cron || ""; $("#s-enabled").checked = s.enabled !== false;
+  $("#s-suite").value = s.suite_id || ""; $("#s-env").value = s.env_id || "";
+  previewCron();
+}
+
+async function toggle(id, enabled) {
+  await api(`/api/schedules/${id}`, { method: "PUT", body: { enabled } });
+  toast(enabled ? "已启用" : "已停用");
+  loadSchedules();
+}
+
+async function delSch(id) {
+  if (!confirm("确认删除该定时任务？")) return;
+  await api(`/api/schedules/${id}`, { method: "DELETE" });
+  toast("已删除");
+  loadSchedules();
+}
+
+async function previewCron() {
+  const expr = $("#s-cron").value.trim();
+  if (!expr) { $("#cron-desc").textContent = ""; return; }
+  try {
+    const d = await api(`/api/cron/describe?expr=${encodeURIComponent(expr)}`);
+    $("#cron-desc").textContent = "含义：" + d.description;
+  } catch (e) { $("#cron-desc").textContent = "表达式无效"; }
+}
+
+$("#btn-new").onclick = newSch;
+$("#btn-cancel").onclick = () => { editingId = null; };
+
+$("#btn-save").onclick = async () => {
+  const cron = $("#s-cron").value.trim();
+  if (!cron) return toast("请输入 cron 表达式", "error");
+  const suiteId = $("#s-suite").value;
+  if (!suiteId) return toast("请选择目标套件", "error");
+  const body = { name: $("#s-name").value || "定时任务", cron, suite_id: suiteId,
+    env_id: $("#s-env").value || null, enabled: $("#s-enabled").checked };
+  try {
+    if (editingId) {
+      await api(`/api/schedules/${editingId}`, { method: "PUT", body });
+      toast("已保存");
+    } else {
+      await api(`/api/projects/${projectId}/schedules`, { method: "POST", body });
+      toast("已创建");
+    }
+  } catch (e) { return toast(e.message, "error"); }
+  loadSchedules();
+};
+
+init();
+</script>
+</body>
+</html>

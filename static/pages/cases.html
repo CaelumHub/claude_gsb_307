@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>测试用例 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .case-list { max-height: 640px; overflow: auto; }
+    .case-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+      cursor: pointer; transition: all .12s; }
+    .case-item:hover { border-color: var(--primary); }
+    .case-item.active { border-color: var(--primary); background: var(--primary-soft); }
+    .case-item .cname { font-weight: 600; font-size: 14px; }
+    .case-item .cmeta { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
+    .step-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+    .step-btns .btn { font-size: 12px; padding: 5px 11px; }
+    .run-out { white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; background: var(--surface-2);
+      border-radius: 8px; padding: 12px; max-height: 340px; overflow: auto; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">测试用例</h1>
+    <p class="page-desc">编写用例的步骤与断言，支持请求 / 脚本 / 断言 / 等待等步骤，可单条试跑。</p>
+
+    <div class="card">
+      <div class="row">
+        <label style="margin:0 6px 0 0;align-self:center">项目</label>
+        <select id="project-select" style="max-width:260px" onchange="switchProject(this.value)"></select>
+        <input type="text" id="q" placeholder="搜索用例名 / 描述" style="max-width:200px" oninput="loadCases()">
+        <select id="tag-filter" style="max-width:140px" onchange="loadCases()"><option value="">全部标签</option></select>
+        <select id="priority-filter" style="max-width:120px" onchange="loadCases()">
+          <option value="">全部优先级</option><option>P0</option><option>P1</option><option>P2</option><option>P3</option>
+        </select>
+        <button class="btn" id="btn-new">新建用例</button>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <!-- 用例列表 -->
+      <section class="card">
+        <h2>用例列表 <span class="muted" id="case-count" style="font-weight:400"></span></h2>
+        <div class="case-list" id="case-list"><div class="empty">加载中…</div></div>
+      </section>
+
+      <!-- 编辑区 -->
+      <section class="card">
+        <div class="row spread"><h2 style="margin:0" id="editor-title">用例编辑</h2>
+          <div class="row">
+            <button class="btn secondary small" id="btn-run">试跑</button>
+            <button class="btn small" id="btn-save">保存</button>
+            <button class="btn danger small" id="btn-delete" style="display:none">删除</button>
+          </div>
+        </div>
+
+        <div class="mt">
+          <label>用例名称 *</label>
+          <input type="text" id="c-name" placeholder="例如：登录成功">
+        </div>
+        <div class="mt">
+          <label>描述</label>
+          <textarea id="c-desc" style="min-height:52px" placeholder="用例意图"></textarea>
+        </div>
+        <div class="grid cols-3 mt">
+          <div><label>优先级</label>
+            <select id="c-priority"><option>P0</option><option>P1</option><option selected>P2</option><option>P3</option></select></div>
+          <div><label>超时（秒）</label><input type="number" id="c-timeout" value="60"></div>
+          <div><label>标签（逗号分隔）</label><input type="text" id="c-tags" placeholder="smoke, api"></div>
+        </div>
+        <div class="mt">
+          <label style="display:inline-flex;gap:6px;font-weight:400;color:var(--text);align-items:center">
+            <input type="checkbox" id="c-enabled" checked style="width:auto"> 启用（取消勾选后执行时跳过）
+          </label>
+        </div>
+
+        <div class="mt">
+          <label>步骤与断言</label>
+          <div class="step-btns">
+            <button class="btn secondary" onclick="addStep('request')">+ 请求</button>
+            <button class="btn secondary" onclick="addStep('assert')">+ 断言</button>
+            <button class="btn secondary" onclick="addStep('set')">+ 赋值</button>
+            <button class="btn secondary" onclick="addStep('script')">+ 脚本</button>
+            <button class="btn secondary" onclick="addStep('sleep')">+ 等待</button>
+          </div>
+          <div id="step-list"><div class="muted">还没有步骤，从上方添加。</div></div>
+        </div>
+
+        <div class="mt">
+          <h3>试跑结果</h3>
+          <div class="run-out" id="run-out">尚未试跑。</div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("cases");
+
+const ASSERT_TYPES = ["equals","not_equals","contains","regex","gt","gte","lt","lte","between","in","status","truthy","json_path"];
+let projectId = null;
+let cases = [];
+let currentId = null;
+let steps = [];
+
+// ---------- 项目 ----------
+async function init() {
+  const params = new URLSearchParams(location.search);
+  projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
+  await loadCases();
+}
+
+async function switchProject(id) { projectId = id; currentId = null; steps = []; resetEditor(); await loadCases(); }
+
+async function loadTags() {
+  if (!projectId) return;
+  const d = await api(`/api/projects/${projectId}/groups`);
+  const sel = $("#tag-filter");
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">全部标签</option>' +
+    (d.groups || []).map(g => `<option value="${esc(g.name)}">${esc(g.name)} (${g.count})</option>`).join("");
+  sel.value = cur;
+}
+
+async function loadCases() {
+  if (!projectId) return;
+  const q = encodeURIComponent($("#q").value || "");
+  const tag = encodeURIComponent($("#tag-filter").value || "");
+  const pr = encodeURIComponent($("#priority-filter").value || "");
+  const d = await api(`/api/projects/${projectId}/cases?q=${q}&tag=${tag}&priority=${pr}`);
+  cases = d.cases || [];
+  $("#case-count").textContent = `（${cases.length}）`;
+  const host = $("#case-list");
+  if (!cases.length) { host.innerHTML = '<div class="empty">暂无用例</div>'; return; }
+  host.innerHTML = cases.map(c => `
+    <div class="case-item ${c.id === currentId ? 'active' : ''}" onclick="loadCase('${c.id}')">
+      <div class="cname">${esc(c.name)}</div>
+      <div class="cmeta">${priorityBadge(c.priority)} ${tagsHtml(c.tags)}
+        <span style="margin-left:6px">${(c.steps||[]).length} 步</span></div>
+    </div>`).join("");
+  await loadTags();
+}
+
+function resetEditor() {
+  currentId = null; steps = [];
+  $("#c-name").value = ""; $("#c-desc").value = "";
+  $("#c-priority").value = "P2"; $("#c-timeout").value = "60";
+  $("#c-tags").value = ""; $("#c-enabled").checked = true;
+  $("#editor-title").textContent = "新建用例";
+  $("#btn-delete").style.display = "none";
+  renderSteps();
+}
+
+async function loadCase(id) {
+  const d = await api(`/api/cases/${id}`);
+  const c = d;
+  currentId = c.id;
+  $("#c-name").value = c.name || ""; $("#c-desc").value = c.description || "";
+  $("#c-priority").value = c.priority || "P2"; $("#c-timeout").value = c.timeout || 60;
+  $("#c-tags").value = (c.tags || []).join(", "); $("#c-enabled").checked = c.enabled !== false;
+  $("#editor-title").textContent = "编辑用例";
+  $("#btn-delete").style.display = "inline-flex";
+  steps = (c.steps || []).map(s => ({ ...s }));
+  renderSteps();
+  $$(".case-item").forEach(el => el.classList.remove("active"));
+  const idx = cases.findIndex(x => x.id === id);
+  if (idx >= 0) $$(".case-item")[idx].classList.add("active");
+}
+
+// ---------- 步骤编辑 ----------
+function addStep(action) {
+  const base = { action, name: action };
+  if (action === "request") Object.assign(base, { method: "GET", url: "/api/health", save_as: "resp" });
+  if (action === "assert") Object.assign(base, { type: "equals", actual: "${resp.status}", expected: "200" });
+  if (action === "set") Object.assign(base, { key: "var", value: "1" });
+  if (action === "script") Object.assign(base, { expr: "1 + 1", save_as: "result" });
+  if (action === "sleep") Object.assign(base, { seconds: "0.1" });
+  if (action === "skip") Object.assign(base, { message: "跳过" });
+  steps.push(base);
+  renderSteps();
+}
+
+function stepField(i, key, value) { steps[i][key] = value; }
+function stepType(i, action) {
+  const name = steps[i].name;
+  steps[i] = { action, name };
+  if (action === "request") Object.assign(steps[i], { method: "GET", url: "/api/health", save_as: "resp" });
+  if (action === "assert") Object.assign(steps[i], { type: "equals", actual: "${resp.status}", expected: "200" });
+  if (action === "set") Object.assign(steps[i], { key: "var", value: "1" });
+  if (action === "script") Object.assign(steps[i], { expr: "1 + 1", save_as: "result" });
+  if (action === "sleep") Object.assign(steps[i], { seconds: "0.1" });
+  renderSteps();
+}
+function removeStep(i) { steps.splice(i, 1); renderSteps(); }
+function moveStep(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= steps.length) return;
+  [steps[i], steps[j]] = [steps[j], steps[i]];
+  renderSteps();
+}
+
+function stepHTML(i, s) {
+  const a = s.action;
+  const head = `
+    <div class="se-head">
+      <span class="badge ${a}">${a}</span>
+      <input type="text" value="${esc(s.name || a)}" placeholder="步骤名称"
+        oninput="stepField(${i},'name',this.value)" style="max-width:180px">
+      <select onchange="stepType(${i}, this.value)" style="max-width:120px">
+        ${["request","assert","set","script","sleep","skip"].map(t => `<option ${t===a?"selected":""}>${t}</option>`).join("")}
+      </select>
+      <span style="flex:1"></span>
+      <button class="btn secondary small" onclick="moveStep(${i},-1)">↑</button>
+      <button class="btn secondary small" onclick="moveStep(${i},1)">↓</button>
+      <button class="btn danger small" onclick="removeStep(${i})">删除</button>
+    </div>`;
+
+  let body = "";
+  if (a === "request") body = `
+    <div class="se-grid">
+      <div><label>方法</label><select onchange="stepField(${i},'method',this.value)">
+        ${["GET","POST","PUT","DELETE"].map(m => `<option ${m===s.method?"selected":""}>${m}</option>`).join("")}</select></div>
+      <div><label>URL</label><input type="text" value="${esc(s.url||"")}" oninput="stepField(${i},'url',this.value)"></div>
+      <div><label>保存为变量</label><input type="text" value="${esc(s.save_as||"resp")}" oninput="stepField(${i},'save_as',this.value)"></div>
+      <div><label>参数(JSON)</label><input type="text" value="${esc(s.params||"")}" placeholder='{"id":1}' oninput="stepField(${i},'params',this.value)"></div>
+    </div>`;
+  else if (a === "assert") body = `
+    <div class="se-grid">
+      <div><label>断言类型</label><select onchange="stepField(${i},'type',this.value)">
+        ${ASSERT_TYPES.map(t => `<option ${t===s.type?"selected":""}>${t}</option>`).join("")}</select></div>
+      <div><label>实际值（可用 ${"${resp.status}"}）</label><input type="text" value="${esc(s.actual||"")}" oninput="stepField(${i},'actual',this.value)"></div>
+      <div><label>期望值</label><input type="text" value="${esc(s.expected||"")}" placeholder="200 或 [10,20]" oninput="stepField(${i},'expected',this.value)"></div>
+    </div>`;
+  else if (a === "set") body = `
+    <div class="se-grid">
+      <div><label>变量名</label><input type="text" value="${esc(s.key||"")}" oninput="stepField(${i},'key',this.value)"></div>
+      <div><label>值</label><input type="text" value="${esc(s.value||"")}" oninput="stepField(${i},'value',this.value)"></div>
+    </div>`;
+  else if (a === "script") body = `
+    <div class="se-grid">
+      <div><label>表达式</label><input type="text" value="${esc(s.expr||"")}" oninput="stepField(${i},'expr',this.value)"></div>
+      <div><label>保存为变量</label><input type="text" value="${esc(s.save_as||"")}" oninput="stepField(${i},'save_as',this.value)"></div>
+    </div>`;
+  else if (a === "sleep") body = `
+    <div class="se-grid"><div><label>秒数</label><input type="text" value="${esc(s.seconds||"")}" oninput="stepField(${i},'seconds',this.value)"></div></div>`;
+  else if (a === "skip") body = `
+    <div class="se-grid"><div><label>说明</label><input type="text" value="${esc(s.message||"")}" oninput="stepField(${i},'message',this.value)"></div></div>`;
+
+  return `<div class="step-editor">${head}${body}</div>`;
+}
+
+function renderSteps() {
+  const host = $("#step-list");
+  if (!steps.length) { host.innerHTML = '<div class="muted">还没有步骤，从上方添加。</div>'; return; }
+  host.innerHTML = steps.map((s, i) => stepHTML(i, s)).join("");
+}
+
+// ---------- 序列化 / 保存 ----------
+function serializeSteps() {
+  return steps.map(s => {
+    const out = { action: s.action, name: s.name || s.action };
+    if (s.action === "request") Object.assign(out, { method: s.method, url: s.url || "/",
+      save_as: s.save_as || "resp", params: parseLiteral(s.params || ""), headers: parseLiteral(s.headers || ""), body: parseLiteral(s.body || "") });
+    if (s.action === "assert") Object.assign(out, { type: s.type || "equals",
+      actual: parseLiteral(s.actual ?? ""), expected: parseLiteral(s.expected ?? "") });
+    if (s.action === "set") Object.assign(out, { key: s.key || "var", value: parseLiteral(s.value ?? "") });
+    if (s.action === "script") Object.assign(out, { expr: s.expr || "", save_as: s.save_as || "" });
+    if (s.action === "sleep") Object.assign(out, { seconds: parseFloat(s.seconds || "0.1") });
+    if (s.action === "skip") Object.assign(out, { message: s.message || "跳过" });
+    return out;
+  });
+}
+
+function readEditor() {
+  return {
+    name: $("#c-name").value.trim(),
+    description: $("#c-desc").value,
+    priority: $("#c-priority").value,
+    timeout: parseInt($("#c-timeout").value || "60", 10),
+    tags: ($("#c-tags").value || "").split(",").map(t => t.trim()).filter(Boolean),
+    enabled: $("#c-enabled").checked,
+    steps: serializeSteps(),
+  };
+}
+
+$("#btn-new").onclick = () => { resetEditor(); };
+
+$("#btn-save").onclick = async () => {
+  const body = readEditor();
+  if (!body.name) return toast("请输入用例名称", "error");
+  if (!projectId) return toast("请先选择项目", "error");
+  if (currentId) {
+    await api(`/api/cases/${currentId}`, { method: "PUT", body });
+    toast("已保存");
+  } else {
+    await api(`/api/projects/${projectId}/cases`, { method: "POST", body });
+    toast("已创建");
+  }
+  loadCases();
+};
+
+$("#btn-delete").onclick = async () => {
+  if (!currentId) return;
+  if (!confirm("确认删除该用例？")) return;
+  await api(`/api/cases/${currentId}`, { method: "DELETE" });
+  toast("已删除");
+  resetEditor(); loadCases();
+};
+
+$("#btn-run").onclick = async () => {
+  const body = readEditor();
+  if (!body.name) return toast("请输入用例名称", "error");
+  setLoading($("#btn-run"), true, "执行中…");
+  $("#run-out").textContent = "执行中…";
+  try {
+    // 单条试跑：直接提交一个临时用例
+    const r = await api(`/api/projects/${projectId}/cases`, { method: "POST", body });
+    const res = await api(`/api/cases/${r.id}/run`, { method: "POST", body: {} });
+    $("#run-out").textContent = JSON.stringify(res, null, 2);
+    await api(`/api/cases/${r.id}`, { method: "DELETE" });
+    loadCases();
+  } catch (e) {
+    $("#run-out").textContent = "错误：" + e.message;
+    toast(e.message, "error");
+  }
+  setLoading($("#btn-run"), false);
+};
+
+init();
+</script>
+</body>
+</html>
