@@ -107,10 +107,35 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "id": new_id("suite"),
         "project_id": pid,
         "name": "冒烟测试套件",
-        "description": "核心链路冒烟",
+        "description": "核心链路冒烟（带编排：登录通过后才跑依赖它的用例）",
         "group": "smoke",
         "env_id": env["id"],
         "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8],
+        "orchestration": {
+            "enabled": True,
+            # 前置动作：准备数据；后置动作：清理现场
+            "setup": [
+                {"action": "request", "method": "POST", "url": "/api/testdata/prepare",
+                 "name": "准备测试数据"},
+                {"action": "assert", "type": "status", "actual": "${resp.status}",
+                 "expected": 200, "name": "数据准备成功"},
+            ],
+            "teardown": [
+                {"action": "request", "method": "POST", "url": "/api/testdata/cleanup",
+                 "name": "清理测试现场"},
+            ],
+            "teardown_policy": "always",
+            # 用例 B 依赖 A：健康检查 / 登录必须先通过
+            "dependencies": [
+                {"case_id": c3, "depends_on": [c1, c2]},
+                {"case_id": c4, "depends_on": [c2]},
+            ],
+            "dependency_policy": "passed",
+            "on_skipped": "block",
+            "on_failure": "continue",
+            # 按优先级分批，批次 P0 -> P1 -> P2 -> P3 串行，批内并发 3
+            "batching": {"mode": "priority", "concurrency": 3},
+        },
         "created_at": time.time(),
     }
     registry.store("suites").insert(suite)

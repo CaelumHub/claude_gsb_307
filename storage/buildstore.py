@@ -66,12 +66,14 @@ def _empty_build(build_id: str, project_id: str, **kw: Any) -> dict:
         "error": 0,
         "skipped": 0,
         "timeout": 0,
+        "blocked": 0,
         "started_at": None,
         "finished_at": None,
         "duration": 0.0,
         "by_group": {},
         "by_priority": {},
         "durations": [],
+        "plan": kw.get("plan"),
         "created_at": time.time(),
     }
     return build
@@ -113,6 +115,9 @@ class BuildStore:
 
     def _case_log_path(self, build_id: str, case_id: str) -> str:
         return os.path.join(self._logs_dir(build_id), f"{case_id}.log")
+
+    def _timeline_path(self, build_id: str) -> str:
+        return os.path.join(self._build_dir(build_id), "timeline.json")
 
     # -- 构建生命周期 -----------------------------------------------------
     def create(self, build_id: str, **kw: Any) -> dict:
@@ -193,7 +198,7 @@ class BuildStore:
 
             # 1) 更新聚合计数
             status = result.get("status", "error")
-            if status in ("passed", "failed", "error", "skipped", "timeout"):
+            if status in ("passed", "failed", "error", "skipped", "timeout", "blocked"):
                 build[status] = build.get(status, 0) + 1
             build["durations"] = build.get("durations", []) + [result.get("duration", 0.0)]
 
@@ -201,7 +206,7 @@ class BuildStore:
             gp = build.setdefault("by_group", {})
             entry = gp.setdefault(group, {"total": 0, "passed": 0, "failed": 0,
                                           "error": 0, "skipped": 0, "timeout": 0,
-                                          "duration": 0.0})
+                                          "blocked": 0, "duration": 0.0})
             entry["total"] += 1
             entry[status if status in entry else "error"] += 1
             entry["duration"] = round(entry["duration"] + result.get("duration", 0.0), 3)
@@ -209,7 +214,8 @@ class BuildStore:
             priority = result.get("priority") or "P3"
             pp = build.setdefault("by_priority", {})
             pe = pp.setdefault(priority, {"total": 0, "passed": 0, "failed": 0,
-                                          "error": 0, "skipped": 0, "timeout": 0})
+                                          "error": 0, "skipped": 0, "timeout": 0,
+                                          "blocked": 0})
             pe["total"] += 1
             pe[status if status in pe else "error"] += 1
 
@@ -300,6 +306,41 @@ class BuildStore:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
+
+    # -- 编排时间线 -------------------------------------------------------
+    # 编排的每一步（前置动作、每一批的开始/结束、单个用例被放行/阻断、
+    # 后置动作）都追加一条事件。监控页据此逐步呈现编排推进过程。事件同时
+    # 镜像到 build.log，保证实时日志里也能看到。
+    def append_event(self, build_id: str, kind: str, title: str,
+                     status: str = "running", **extra: Any) -> dict:
+        """追加一条编排事件（锁内读-改-写），返回该事件。"""
+        event = {"seq": 0, "ts": time.time(), "kind": kind,
+                 "title": title, "status": status}
+        event.update(extra)
+        with FileLock(self._lock(build_id)):
+            timeline = read_json(self._timeline_path(build_id), [])
+            if not isinstance(timeline, list):
+                timeline = []
+            event["seq"] = len(timeline) + 1
+            timeline.append(event)
+            atomic_write_json(self._timeline_path(build_id), timeline)
+            self._append_log_locked(
+                build_id,
+                f"[编排] {self._event_icon(status)} {title}"
+                + (f" — {extra['detail']}" if extra.get("detail") else ""),
+            )
+        return event
+
+    @staticmethod
+    def _event_icon(status: str) -> str:
+        return {"running": "▶", "passed": "✓", "failed": "✗",
+                "skipped": "○", "blocked": "⊘", "error": "✗",
+                "cancelled": "■"}.get(status, "•")
+
+    def read_timeline(self, build_id: str) -> list[dict]:
+        with FileLock(self._lock(build_id), mode="shared"):
+            data = read_json(self._timeline_path(build_id), [])
+            return data if isinstance(data, list) else []
 
     # -- 结果查询 ---------------------------------------------------------
     def results(self, build_id: str, where: Optional[list] = None,

@@ -355,6 +355,58 @@ class TestExecutor:
             time.sleep(min(chunk, remaining))
             remaining -= chunk
 
+    # -- 前置 / 后置动作 --------------------------------------------------
+    def execute_phase(self, phase: str, steps: list, env_config: dict = None,
+                      cancel_event=None, timeout: float = 300) -> dict:
+        """执行套件编排里的前置（setup）/ 后置（teardown）动作。
+
+        与用例执行共用同一套步骤语义（请求 / 赋值 / 脚本 / 断言 / 等待），
+        但不计入用例结果。任一步失败 / 出错即终止整个阶段并标记失败。
+        后置阶段（teardown）传入的 cancel_event 应为一个全新的事件，
+        从而即使构建已被取消，清理动作也能尽量跑完。
+        """
+        env_config = env_config or {}
+        started = time.time()
+        deadline = started + timeout
+        self.target = MockTarget(env_config)
+        variables = dict(env_config.get("variables", {}))
+
+        logs: list[str] = [f"编排阶段 {phase} 开始，共 {len(steps)} 个动作"]
+        steps_out: list[dict] = []
+        status = "passed"
+
+        for idx, step in enumerate(steps or []):
+            if cancel_event is not None and cancel_event.is_set():
+                status = "error"
+                logs.append(f"阶段 {phase} 被取消，剩余动作未执行")
+                break
+            if time.time() > deadline:
+                status = "timeout"
+                logs.append(f"阶段 {phase} 超时（>{timeout}s），在第 {idx + 1} 个动作停止")
+                break
+            step_result = self._run_step(step, variables, f"phase-{phase}", idx,
+                                         cancel_event)
+            steps_out.append(step_result)
+            logs.append(f"  动作 {idx + 1}/{len(steps)} [{step_result['status']}] "
+                        f"{step_result['name']}: {step_result['message']}")
+            if step_result["status"] == "failed":
+                status = "failed"
+                logs.append(f"  阶段 {phase} 因动作 {idx + 1} 失败而终止")
+                break
+            if step_result["status"] == "error":
+                status = "error"
+                logs.append(f"  阶段 {phase} 因动作 {idx + 1} 出错而终止")
+                break
+
+        logs.append(f"编排阶段 {phase} 结束: {status}")
+        return {
+            "phase": phase,
+            "status": status,
+            "duration": round(time.time() - started, 3),
+            "steps": steps_out,
+            "logs": logs,
+        }
+
     # -- 用例执行 ---------------------------------------------------------
     def execute_case(self, case: dict, env_config: dict = None,
                      cancel_event=None, timeout: float = None) -> dict:

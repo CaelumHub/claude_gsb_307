@@ -15,6 +15,15 @@
     .live .console { flex: 1; min-height: 320px; }
     .meta-line { font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--border); }
     .result-item { font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    .timeline { max-height: 300px; overflow: auto; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--surface-2); padding: 8px 12px; font-size: 13px; }
+    .tl-item { display: flex; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--border); align-items: baseline; }
+    .tl-item:last-child { border-bottom: none; }
+    .tl-time { color: var(--text-muted); font-family: var(--mono); font-size: 11px; min-width: 64px; }
+    .tl-kind { font-size: 11px; color: var(--text-muted); min-width: 34px; }
+    .tl-detail { color: var(--text-muted); font-size: 12px; }
+    .skip-reason { display:block; color: var(--violet); font-size: 12px; margin-top: 2px; }
+    .skip-reason.cancel { color: #94a3b8; }
   </style>
 </head>
 <body>
@@ -50,9 +59,13 @@
           <button class="btn danger small" id="btn-cancel" style="display:none">取消构建</button>
         </div>
         <div id="live-meta"></div>
+        <div class="mt" id="timeline-wrap" style="display:none">
+          <h3>编排步骤 <span class="muted" style="font-weight:400;font-size:12px" id="tl-summary"></span></h3>
+          <div class="timeline" id="timeline"></div>
+        </div>
         <div class="mt"><label>实时日志</label>
           <div class="console" id="console">—</div></div>
-        <div class="mt"><h3>用例结果</h3><div id="results"></div></div>
+        <div class="mt"><h3>用例结果 <span id="blocked-count" class="muted" style="font-weight:400;font-size:12px"></span></h3><div id="results"></div></div>
       </section>
     </div>
   </main>
@@ -89,7 +102,7 @@ async function loadBuilds() {
   const host = $("#build-list");
   if (!list.length) { host.innerHTML = '<div class="empty">暂无构建，到「套件」页触发一次执行。</div>'; return; }
   host.innerHTML = list.map(b => {
-    const total = b.total || 0, done = (b.passed||0)+(b.failed||0)+(b.error||0)+(b.timeout||0)+(b.skipped||0);
+    const total = b.total || 0, done = (b.passed||0)+(b.failed||0)+(b.error||0)+(b.timeout||0)+(b.skipped||0)+(b.blocked||0);
     const ratio = total ? done/total : 0;
     return `<div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
       <div class="row spread">
@@ -121,15 +134,20 @@ async function poll() {
   try {
     const b = await api(`/api/builds/${currentBuild}`);
     $("#live-title").textContent = b.name || b.id;
-    const total = b.total || 0, done = (b.passed||0)+(b.failed||0)+(b.error||0)+(b.timeout||0)+(b.skipped||0);
+    const total = b.total || 0, done = (b.passed||0)+(b.failed||0)+(b.error||0)+(b.timeout||0)+(b.skipped||0)+(b.blocked||0);
     $("#live-meta").innerHTML = `
       <div class="row mt">${statusBadge(b.status)}
-        <span class="muted" style="font-size:13px">通过 <strong>${b.passed||0}</strong> / 失败 <strong style="color:var(--red)">${(b.failed||0)+(b.error||0)+(b.timeout||0)}</strong> / 共 ${total}</span>
+        <span class="muted" style="font-size:13px">通过 <strong>${b.passed||0}</strong> / 失败 <strong style="color:var(--red)">${(b.failed||0)+(b.error||0)+(b.timeout||0)}</strong>
+          ${b.blocked ? `/ <strong style="color:var(--violet)">阻断 ${b.blocked}</strong>` : ""}
+          ${b.skipped ? `/ 跳过 ${b.skipped}` : ""} / 共 ${total}</span>
         <span class="muted mono" style="font-size:12px">触发: ${esc(b.trigger||'manual')} · ${fmtTime(b.started_at)}</span>
       </div>
       ${progressBar(total ? done/total : 0, b.status==='passed'?'green':(b.status==='failed'||b.status==='error'?'red':''))}`;
     const running = b.status === "running" || b.status === "pending";
     $("#btn-cancel").style.display = running ? "inline-flex" : "none";
+
+    // 编排时间线
+    await loadTimeline(b);
 
     // 日志增量
     const logs = await api(`/api/builds/${currentBuild}/logs?after=${logSeq}`);
@@ -147,14 +165,59 @@ async function poll() {
   } catch (e) { /* 构建可能被删除 */ }
 }
 
+function fmtClock(ts) {
+  if (!ts) return "--:--:--";
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString("zh-CN", { hour12: false });
+}
+async function loadTimeline(b) {
+  const wrap = $("#timeline-wrap");
+  const isOrc = b && b.plan && b.plan.batches && b.plan.batches.length;
+  if (!isOrc) { wrap.style.display = "none"; return; }
+  wrap.style.display = "block";
+  const nb = b.plan.batches.length;
+  $("#tl-summary").textContent = `（${nb} 批 · 前置 ${b.plan.setup_count||0} 步 · 后置 ${b.plan.teardown_count||0} 步）`;
+  const d = await api(`/api/builds/${currentBuild}/timeline`);
+  const events = d.events || [];
+  // 构建运行中持续刷新；结束后保留全部
+  const host = $("#timeline");
+  host.innerHTML = events.map(ev => {
+    const indent = ev.kind === "case" ? "padding-left:18px" : (ev.kind === "batch" ? "padding-left:6px" : "");
+    const detail = ev.detail ? `<span class="tl-detail">— ${esc(ev.detail)}</span>` : "";
+    const dur = ev.duration != null && ev.duration > 0 ? ` <span class="tl-detail">${fmtDur(ev.duration)}</span>` : "";
+    return `<div class="tl-item" style="${indent}">
+      <span class="tl-time">${fmtClock(ev.ts)}</span>
+      <span class="tl-kind">${ev.kind === "phase" ? "动作" : ev.kind === "batch" ? "批次" : ev.kind === "case" ? "用例" : "构建"}</span>
+      ${statusBadge(ev.status)}
+      <span>${esc(ev.title)}</span>${detail}${dur}
+    </div>`;
+  }).join("");
+  host.scrollTop = host.scrollHeight;
+}
+
 function renderResults(results, running) {
   const host = $("#results");
-  if (!results.length) { host.innerHTML = '<div class="muted">' + (running ? "执行中，暂无结果…" : "无结果") + '</div>'; return; }
-  host.innerHTML = `<div style="max-height:260px;overflow:auto">` + results.map(r => `
-    <div class="result-item row spread">
-      <span>${esc(r.case_name||r.case_id)} ${statusBadge(r.status)}</span>
-      <span class="mono muted" style="font-size:12px">${fmtDur(r.duration)}</span>
-    </div>`).join("") + "</div>";
+  if (!results.length) { host.innerHTML = '<div class="muted">' + (running ? "执行中，暂无结果…" : "无结果") + '</div>'; $("#blocked-count").textContent = ""; return; }
+  const blocked = results.filter(r => r.status === "blocked").length;
+  const skipped = results.filter(r => r.status === "skipped").length;
+  $("#blocked-count").textContent = blocked
+    ? `（依赖未满足 ${blocked} 个${skipped ? ` · 普通跳过 ${skipped} 个` : ""}）` : "";
+  host.innerHTML = `<div style="max-height:260px;overflow:auto">` + results.map(r => {
+    let reason = "";
+    if (r.status === "blocked") {
+      reason = `<span class="skip-reason">⊘ 依赖未满足：${esc(r.skip_reason || r.message || "被依赖的用例未通过")}</span>`;
+    } else if (r.status === "skipped" && r.skip_reason) {
+      reason = `<span class="skip-reason cancel">○ ${esc(r.skip_reason)}</span>`;
+    }
+    const batch = r.batch ? `<span class="muted" style="font-size:11px">第${r.batch}批</span>` : "";
+    return `
+    <div class="result-item">
+      <div class="row spread">
+        <span>${esc(r.case_name||r.case_id)} ${statusBadge(r.status)} ${batch}</span>
+        <span class="mono muted" style="font-size:12px">${fmtDur(r.duration)}</span>
+      </div>${reason}
+    </div>`;
+  }).join("") + "</div>";
 }
 
 $("#btn-cancel").onclick = async () => {

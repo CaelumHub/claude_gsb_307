@@ -28,6 +28,9 @@ from .report import ReportGenerator
 from .defects import DefectManager
 from .notify import NotificationManager
 from .scheduler import Scheduler
+from .orchestration import (
+    BATCH_MODES, DEPENDENCY_POLICIES, PlanError, normalize_plan, describe_plan,
+)
 
 __all__ = [
     "PRIORITIES",

@@ -186,6 +186,7 @@ td .mono { font-size: 12px; color: var(--text-muted); }
 .badge.pending { background: #f1f5f9; color: #64748b; }
 .badge.cancelled, .badge.skipped { background: #f1f5f9; color: #94a3b8; }
 .badge.timeout { background: #fef3e2; color: var(--amber); }
+.badge.blocked { background: #f3e8ff; color: var(--violet); border: 1px dashed var(--violet); }
 .badge.blue { background: var(--primary-soft); color: var(--blue); }
 .badge.violet { background: #f3e8ff; color: var(--violet); }
 

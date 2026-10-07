@@ -21,11 +21,20 @@ from __future__ import annotations
 import datetime
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
+                                as_completed, wait as futures_wait)
 from typing import Optional
 
 from .cron import cron_matches, parse_cron
 from .models import new_id
+from .orchestration import describe_plan
+
+
+def _public_plan(plan: Optional[dict]) -> Optional[dict]:
+    """存入 build.json 的编排摘要（去掉仅供运行时使用的 dep_map）。"""
+    if plan is None:
+        return None
+    return describe_plan(plan)
 
 
 class Scheduler:
@@ -90,9 +99,21 @@ class Scheduler:
             return {"error": "环境不存在"}
 
         case_ids = suite.get("case_ids") or []
-        cases = cases_store.get_many(case_ids)
+        # 用例按套件顺序执行（get_many 来自分片存储，顺序不保证）
+        case_by_id = {c.get("id"): c for c in cases_store.get_many(case_ids)}
+        cases = [case_by_id[cid] for cid in case_ids if cid in case_by_id]
         if not cases:
             return {"error": "套件内没有用例"}
+
+        # 编排计划（可选）：有 enabled 的 orchestration 才走编排执行路径
+        from .orchestration import PlanError, is_enabled, normalize_plan
+        plan = None
+        raw_plan = suite.get("orchestration")
+        if is_enabled(raw_plan):
+            try:
+                plan = normalize_plan(raw_plan, cases, self.max_case_workers)
+            except PlanError as exc:
+                return {"error": f"编排配置无效：{exc}"}
 
         build_id = new_id("build")
         build = self.builds.for_project(project_id).create(
@@ -101,6 +122,7 @@ class Scheduler:
             env_id=env_id,
             name=suite.get("name", ""),
             trigger=trigger,
+            plan=_public_plan(plan) if plan else None,
         )
 
         cancel_event = threading.Event()
@@ -112,7 +134,8 @@ class Scheduler:
             }
 
         self._build_pool.submit(
-            self._run_build, project_id, build_id, cases, env_id, cancel_event)
+            self._run_build, project_id, build_id, cases, env_id, cancel_event,
+            plan)
 
         # 若是定时触发，记录一次计划运行历史
         if schedule_id:
@@ -146,7 +169,20 @@ class Scheduler:
 
     # ------------------------------------------------------------------ 构建执行
     def _run_build(self, project_id: str, build_id: str, cases: list,
-                   env_id: str, cancel_event: threading.Event) -> None:
+                   env_id: str, cancel_event: threading.Event,
+                   plan: Optional[dict] = None) -> None:
+        if plan is not None:
+            self._run_orchestrated_build(
+                project_id, build_id, cases, env_id, cancel_event, plan)
+            with self._running_lock:
+                self._running.pop(build_id, None)
+            return
+        self._run_flat_build(project_id, build_id, cases, env_id, cancel_event)
+        with self._running_lock:
+            self._running.pop(build_id, None)
+
+    def _run_flat_build(self, project_id: str, build_id: str, cases: list,
+                        env_id: str, cancel_event: threading.Event) -> None:
         store = self.builds.for_project(project_id)
         env_config = self.env_manager.to_executor_config(env_id)
         store.set_total(build_id, len(cases))
@@ -215,9 +251,6 @@ class Scheduler:
         # 收尾：报告 + 覆盖率 + 通知 + 自动缺陷
         self._finalize(project_id, build_id)
 
-        with self._running_lock:
-            self._running.pop(build_id, None)
-
     def _run_one(self, case: dict, env_config: dict, env_id: str,
                  index: int, cancel_event: threading.Event) -> dict:
         result = self.executor.execute_case(
@@ -233,6 +266,365 @@ class Scheduler:
         if case_id:
             log_text = "\n".join(result.get("logs", []))
             store.write_case_log(build_id, case_id, log_text)
+
+    # ------------------------------------------------------------------ 编排执行
+    def _run_orchestrated_build(self, project_id: str, build_id: str, cases: list,
+                                env_id: str, cancel_event: threading.Event,
+                                plan: dict) -> None:
+        """按编排计划执行：前置动作 → 逐批（依赖门控 + 每批并发）→ 后置动作。"""
+        store = self.builds.for_project(project_id)
+        env_config = self.env_manager.to_executor_config(env_id)
+        store.set_total(build_id, len(cases))
+        store.append_log(
+            build_id,
+            f"构建 {build_id} 以编排模式开始：{len(plan['batches'])} 批，"
+            f"{len(cases)} 个用例，依赖策略 {plan['dependency_policy']}，环境 {env_id}")
+        store.append_event(build_id, "build", "构建开始（编排模式）", "running",
+                           detail=f"{len(plan['batches'])} 批 / {len(cases)} 用例")
+
+        case_by_id = {c.get("id"): c for c in cases}
+        # statuses: 用例 id -> 终态字符串；reasons 记录阻断/跳过原因
+        statuses: dict[str, str] = {}
+        reasons: dict[str, str] = {}
+        order_counter = {"n": 0}
+        aborted = False  # 前置动作失败导致整场跳过
+
+        # -- 1) 前置动作 ---------------------------------------------------
+        if plan.get("setup"):
+            setup = self._run_phase(store, build_id, "setup", plan["setup"],
+                                    env_config, env_id, cancel_event)
+            if setup["status"] != "passed":
+                aborted = True
+                store.append_log(build_id, "前置动作失败，全部用例不再执行，"
+                                           "直接进入后置清理（若有）")
+
+        # -- 2) 分批执行 ---------------------------------------------------
+        if aborted:
+            for case in cases:
+                self._record_blocked(store, build_id, case, order_counter,
+                                     reason="前置动作（setup）未通过")
+                statuses[case.get("id")] = "blocked"
+                reasons[case.get("id")] = "前置动作（setup）未通过"
+        elif cancel_event.is_set():
+            for case in cases:
+                self._record_cancel_skipped(store, build_id, case, order_counter)
+                statuses[case.get("id")] = "skipped"
+        else:
+            for bi, group in enumerate(plan["batches"], start=1):
+                statuses, reasons, cancel_event, should_stop = self._run_batch(
+                    store, build_id, group, bi, plan, case_by_id, statuses,
+                    reasons, order_counter, env_config, env_id, cancel_event)
+                if should_stop:
+                    # 构建被取消：本批及后续批次中还没有终态的用例记为「取消跳过」
+                    for gi, g in enumerate(plan["batches"][bi - 1:], start=bi):
+                        for cid in g["case_ids"]:
+                            if cid not in statuses and cid in case_by_id:
+                                self._record_cancel_skipped(
+                                    store, build_id, case_by_id[cid], order_counter,
+                                    batch_index=gi)
+                                statuses[cid] = "skipped"
+                    break
+
+        # -- 3) 后置动作（默认总是执行，即便取消 / 前置失败） ---------------
+        if plan.get("teardown"):
+            if cancel_event.is_set() and plan.get("teardown_policy", "always") == "always":
+                teardown_cancel = threading.Event()  # 放行取消，保证清理跑完
+                store.append_log(build_id, "构建已取消，后置清理仍按策略执行")
+            else:
+                teardown_cancel = cancel_event
+            self._run_phase(store, build_id, "teardown", plan["teardown"],
+                            env_config, env_id, teardown_cancel)
+
+        # -- 4) 终态判定 ---------------------------------------------------
+        build = store.get(build_id)
+        teardown_failed = False
+        if plan.get("teardown"):
+            # 后置动作失败通过时间线最后状态体现；读日志代价大，这里以时间线判断
+            last_teardown = [e for e in store.read_timeline(build_id)
+                             if e.get("kind") == "phase" and e.get("name") == "teardown"]
+            teardown_failed = bool(last_teardown and
+                                   last_teardown[-1].get("status") not in ("passed",))
+        if cancel_event.is_set():
+            status = "cancelled"
+        elif (build.get("failed", 0) + build.get("error", 0) + build.get("timeout", 0)
+              + build.get("blocked", 0)) == 0 and not teardown_failed:
+            status = "passed"
+        else:
+            status = "failed"
+        store.finish(build_id, status)
+        store.append_log(build_id, f"构建结束: {status}（通过 {build.get('passed', 0)}"
+                                   f"/{build.get('total', 0)}，阻断 {build.get('blocked', 0)}，"
+                                   f"跳过 {build.get('skipped', 0)}）")
+        store.append_event(build_id, "build", f"构建结束：{status}", status,
+                           detail=f"通过 {build.get('passed', 0)}/{build.get('total', 0)}")
+        self._finalize(project_id, build_id)
+
+    def _run_phase(self, store, build_id: str, phase: str, steps: list,
+                   env_config: dict, env_id: str,
+                   cancel_event: threading.Event) -> dict:
+        """执行一个前置 / 后置阶段，并把进度逐动作写入时间线。"""
+        label = "前置动作" if phase == "setup" else "后置动作"
+        store.append_event(build_id, "phase", f"{label}开始", "running",
+                           name=phase, detail=f"{len(steps)} 个动作")
+        result = self.executor.execute_phase(
+            phase, steps, env_config, cancel_event=cancel_event)
+        for line in result.get("logs", []):
+            store.append_log(build_id, line)
+        status = result["status"]
+        failing = next((s for s in result.get("steps", [])
+                        if s.get("status") in ("failed", "error", "timeout")), None)
+        detail = (failing or {}).get("message", "") if failing else ""
+        store.append_event(build_id, "phase", f"{label}{self._phase_word(status)}",
+                           status if status in ("passed", "failed", "error", "timeout")
+                           else "error", name=phase, detail=detail,
+                           duration=result.get("duration", 0.0))
+        return result
+
+    @staticmethod
+    def _phase_word(status: str) -> str:
+        return {"passed": "通过", "failed": "失败", "error": "出错",
+                "timeout": "超时"}.get(status, "结束")
+
+    def _run_batch(self, store, build_id: str, group: dict, batch_index: int,
+                   plan: dict, case_by_id: dict, statuses: dict, reasons: dict,
+                   order_counter: dict, env_config: dict, env_id: str,
+                   cancel_event: threading.Event):
+        """执行一批：批内按依赖门控放行，并发不超过该批 concurrency。
+
+        返回 ``(statuses, reasons, cancel_event, should_stop)``，``should_stop``
+        为 True 表示构建被取消，后续批次不再执行。
+        """
+        ids = group["case_ids"]
+        concurrency = max(1, min(int(group.get("concurrency")
+                                     or plan["default_concurrency"]), len(ids) or 1))
+        dep_map = plan["dep_map"]
+        store.append_event(
+            build_id, "batch",
+            f"第 {batch_index} 批「{group['name']}」开始", "running",
+            batch=batch_index, detail=f"{len(ids)} 用例 · 并发 {concurrency}",
+            concurrency=concurrency, size=len(ids))
+        store.append_log(build_id, f"[批次 {batch_index}] {group['name']} 开始"
+                                   f"（{len(ids)} 用例，并发上限 {concurrency}）")
+
+        pending = [cid for cid in ids]          # 尚未有终态、也未提交
+        in_flight: dict = {}                     # future -> case_id
+        batch_failure_seen = False
+
+        def gate(cid: str) -> str:
+            """依赖门控：返回 running（继续等待）/ blocked:<原因> / ready。"""
+            for dep in dep_map.get(cid, []):
+                dep_st = statuses.get(dep)
+                dep_name = case_by_id.get(dep, {}).get("name", dep)
+                if dep_st is None:
+                    # 依赖还在跑 / 在本批未提交 / 在后续批次：先等
+                    return "running"
+                if dep_st == "blocked":
+                    return f"blocked:依赖用例「{dep_name}」因依赖未满足被阻断"
+                if dep_st == "skipped":
+                    if plan["on_skipped"] == "block":
+                        return f"blocked:依赖用例「{dep_name}」被跳过"
+                    continue
+                if dep_st == "passed":
+                    continue
+                # failed / error / timeout
+                if plan["dependency_policy"] == "passed":
+                    return f"blocked:依赖用例「{dep_name}」未通过（{dep_st}）"
+                if plan["dependency_policy"] == "completed":
+                    continue
+                # any：跑完即可
+                continue
+            return "ready"
+
+        pool = ThreadPoolExecutor(max_workers=concurrency,
+                                  thread_name_prefix=f"orc-{build_id[:6]}-{batch_index}")
+        try:
+            while pending or in_flight:
+                if cancel_event.is_set():
+                    break
+
+                # 提交所有已可放行的用例（受并发上限约束）
+                still_pending = []
+                for cid in pending:
+                    if len(in_flight) >= concurrency:
+                        still_pending.append(cid)
+                        continue
+                    verdict = gate(cid)
+                    case = case_by_id[cid]
+                    if verdict == "running":
+                        still_pending.append(cid)
+                        continue
+                    if verdict.startswith("blocked:"):
+                        reason = verdict.split(":", 1)[1]
+                        self._record_blocked(store, build_id, case,
+                                             order_counter, reason=reason,
+                                             batch_index=batch_index)
+                        statuses[cid] = "blocked"
+                        reasons[cid] = reason
+                        store.append_event(
+                            build_id, "case",
+                            f"用例「{case.get('name', cid)}」依赖未满足，跳过",
+                            "blocked", case_id=cid, batch=batch_index,
+                            detail=reason)
+                        continue
+                    if not case.get("enabled", True):
+                        result = self.executor.execute_case(case, env_config,
+                                                            cancel_event=cancel_event)
+                        self._persist_ordered(store, build_id, case, result,
+                                              order_counter, batch_index)
+                        statuses[cid] = result["status"]
+                        store.append_event(
+                            build_id, "case",
+                            f"用例「{case.get('name', cid)}」已禁用，跳过",
+                            "skipped", case_id=cid, batch=batch_index,
+                            detail="用例被禁用（普通跳过）")
+                        continue
+                    if batch_failure_seen and plan["on_failure"] == "abort_batch":
+                        reason = "本批已有用例失败（on_failure=abort_batch）"
+                        self._record_blocked(store, build_id, case,
+                                             order_counter, reason=reason,
+                                             batch_index=batch_index)
+                        statuses[cid] = "blocked"
+                        reasons[cid] = reason
+                        store.append_event(
+                            build_id, "case",
+                            f"用例「{case.get('name', cid)}」因本批失败被中止，跳过",
+                            "blocked", case_id=cid, batch=batch_index, detail=reason)
+                        continue
+                    order_counter["n"] += 1
+                    fut = pool.submit(self._run_one, case, env_config, env_id,
+                                      order_counter["n"], cancel_event)
+                    in_flight[fut] = cid
+                    store.append_event(
+                        build_id, "case", f"用例「{case.get('name', cid)}」开始",
+                        "running", case_id=cid, batch=batch_index)
+                pending = still_pending
+
+                if not in_flight:
+                    if pending:
+                        # 仅剩下「等待本批依赖」的用例却没有在跑任务，理论上
+                        # 不会发生（被依赖者同批时应先提交）；让出时间片兜底。
+                        time.sleep(0.01)
+                    continue
+
+                done, _ = futures_wait(in_flight, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    cid = in_flight.pop(fut)
+                    case = case_by_id[cid]
+                    try:
+                        result = fut.result()
+                    except Exception as exc:  # noqa: BLE001
+                        result = {
+                            "case_id": cid,
+                            "case_name": case.get("name", "未命名用例"),
+                            "group": (case.get("tags") or ["默认"])[0],
+                            "priority": case.get("priority", "P3"),
+                            "status": "error", "duration": 0.0,
+                            "steps": [], "assertions": [],
+                            "logs": [f"用例执行异常: {exc}"],
+                        }
+                    result["batch"] = batch_index
+                    self._persist_result(store, build_id, case, result)
+                    st = result["status"]
+                    statuses[cid] = st
+                    store.append_event(
+                        build_id, "case",
+                        f"用例「{case.get('name', cid)}」{self._case_word(st)}",
+                        st if st in ("passed", "failed", "error", "timeout",
+                                     "skipped", "blocked") else "error",
+                        case_id=cid, batch=batch_index,
+                        duration=result.get("duration", 0.0),
+                        detail=result.get("message") or "")
+                    if st in ("failed", "error", "timeout"):
+                        batch_failure_seen = True
+        finally:
+            pool.shutdown(wait=True, cancel_futures=False)
+
+        # 批结束时仍 pending 的用例（取消）：由上层统一记为取消跳过。
+        remaining = [cid for cid in pending if cid not in statuses]
+        should_stop = cancel_event.is_set()
+        if should_stop:
+            for cid in remaining:
+                self._record_cancel_skipped(store, build_id, case_by_id[cid],
+                                            order_counter, batch_index=batch_index)
+                statuses[cid] = "skipped"
+            batch_status = "cancelled"
+        else:
+            batch_status = "passed"
+        done_count = sum(1 for cid in ids if statuses.get(cid) == "passed")
+        blocked_count = sum(1 for cid in ids if statuses.get(cid) == "blocked")
+        bad = sum(1 for cid in ids
+                  if statuses.get(cid) in ("failed", "error", "timeout"))
+        if bad:
+            batch_status = "failed"
+        elif blocked_count and not should_stop:
+            batch_status = "failed"
+        store.append_event(
+            build_id, "batch",
+            f"第 {batch_index} 批「{group['name']}」结束", batch_status,
+            batch=batch_index,
+            detail=f"通过 {done_count} · 失败 {bad} · 阻断 {blocked_count}")
+        store.append_log(build_id, f"[批次 {batch_index}] {group['name']} 结束"
+                                   f"（通过 {done_count}，失败 {bad}，阻断 {blocked_count}）")
+        return statuses, reasons, cancel_event, should_stop
+
+    @staticmethod
+    def _case_word(status: str) -> str:
+        return {"passed": "通过", "failed": "失败", "error": "出错",
+                "timeout": "超时", "skipped": "跳过",
+                "blocked": "依赖未满足"}.get(status, "结束")
+
+    def _persist_ordered(self, store, build_id: str, case: dict, result: dict,
+                         order_counter: dict, batch_index: int) -> None:
+        order_counter["n"] += 1
+        result["order"] = order_counter["n"]
+        result["batch"] = batch_index
+        self._persist_result(store, build_id, case, result)
+
+    def _record_blocked(self, store, build_id: str, case: dict,
+                        order_counter: dict, reason: str,
+                        batch_index: Optional[int] = None) -> None:
+        """依赖未满足的编排跳过：状态 blocked，带明确 skip_reason。"""
+        order_counter["n"] += 1
+        blocked = {
+            "case_id": case.get("id"),
+            "case_name": case.get("name", "未命名用例"),
+            "group": (case.get("tags") or ["默认"])[0],
+            "priority": case.get("priority", "P3"),
+            "status": "blocked",
+            "duration": 0.0,
+            "steps": [], "assertions": [],
+            "logs": [f"因依赖未满足而被编排跳过：{reason}"],
+            "message": reason,
+            "skip_reason": reason,
+            "skip_kind": "dependency",
+            "order": order_counter["n"],
+        }
+        if batch_index is not None:
+            blocked["batch"] = batch_index
+        store.record_result(build_id, blocked)
+
+    def _record_cancel_skipped(self, store, build_id: str, case: dict,
+                               order_counter: dict,
+                               batch_index: Optional[int] = None) -> None:
+        """构建被取消而未执行：普通 skipped（与 blocked 区分）。"""
+        order_counter["n"] += 1
+        skipped = {
+            "case_id": case.get("id"),
+            "case_name": case.get("name", "未命名用例"),
+            "group": (case.get("tags") or ["默认"])[0],
+            "priority": case.get("priority", "P3"),
+            "status": "skipped",
+            "duration": 0.0,
+            "steps": [], "assertions": [],
+            "logs": ["构建被取消，用例未执行"],
+            "message": "构建被取消",
+            "skip_reason": "构建被取消",
+            "skip_kind": "cancelled",
+            "order": order_counter["n"],
+        }
+        if batch_index is not None:
+            skipped["batch"] = batch_index
+        store.record_result(build_id, skipped)
 
     def _finalize(self, project_id: str, build_id: str) -> None:
         store = self.builds.for_project(project_id)

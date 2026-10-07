@@ -11,6 +11,19 @@
       border: 1px solid var(--border); font-size: 12px; margin: 2px; }
     .case-pick { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
     .case-pick label { display: block; font-weight: 400; color: var(--text); font-size: 14px; margin-bottom: 4px; }
+    .orc { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-top: 12px; background: var(--surface-2); }
+    .orc[hidden] { display: none; }
+    .orc h3 { margin: 0 0 8px; font-size: 15px; }
+    .orc-step { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0; background: var(--surface); }
+    .orc-step select, .orc-step input { font-size: 13px; }
+    .orc-step .row { gap: 6px; }
+    .dep-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 13px; flex-wrap: wrap; }
+    .dep-title { font-weight: 600; min-width: 150px; }
+    .dep-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:6px;
+      background:var(--surface); border:1px solid var(--border); font-size:12px; cursor:pointer; margin:2px; }
+    .dep-chip.on { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+    .manual-batch { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0; background: var(--surface); }
+    .muted-small { color: var(--text-muted); font-size: 12px; }
   </style>
 </head>
 <body>
@@ -54,6 +67,89 @@
         <div><label>选择用例</label></div>
       </div>
       <div class="case-pick mt" id="case-pick"><div class="muted">加载用例…</div></div>
+
+      <!-- 套件编排 -->
+      <div class="mt">
+        <label style="display:inline-flex;gap:8px;font-weight:600;color:var(--text);align-items:center">
+          <input type="checkbox" id="o-enabled" style="width:auto"> 启用套件编排（前置/后置动作 · 用例依赖 · 分批并发）
+        </label>
+
+        <div class="orc" id="orc-panel" hidden>
+          <div class="grid cols-2">
+            <div>
+              <h3>前置动作（setup · 运行前准备数据）</h3>
+              <div id="setup-list"></div>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('setup','request')">+ 请求</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('setup','set')">+ 赋值</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('setup','script')">+ 脚本</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('setup','assert')">+ 断言</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('setup','sleep')">+ 等待</button>
+            </div>
+            <div>
+              <h3>后置动作（teardown · 运行后清理现场）</h3>
+              <div id="teardown-list"></div>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('teardown','request')">+ 请求</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('teardown','set')">+ 赋值</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('teardown','script')">+ 脚本</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('teardown','assert')">+ 断言</button>
+              <button class="btn secondary small" type="button" onclick="addOrcStep('teardown','sleep')">+ 等待</button>
+              <div class="mt">
+                <label style="font-weight:400;font-size:13px">清理时机</label>
+                <select id="o-teardown-policy">
+                  <option value="always" selected>总是执行（即使取消/前置失败也清理）</option>
+                  <option value="on_success">仅在全部通过后清理</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt">
+            <h3>用例顺序依赖</h3>
+            <p class="muted-small">勾选每个用例「必须先跑通」的用例。被依赖者未通过时，本用例在监控页会标注为「依赖未满足」（紫色），与普通跳过区分。</p>
+            <div id="dep-editor"><div class="muted">请先选择用例</div></div>
+          </div>
+
+          <div class="grid cols-3 mt">
+            <div><label>分批方式</label>
+              <select id="o-batch-mode" onchange="renderBatchConfig()">
+                <option value="all">不分批（全部一批）</option>
+                <option value="priority">按优先级分批（P0→P3）</option>
+                <option value="tag">按标签分批</option>
+                <option value="manual">手工分批</option>
+              </select>
+            </div>
+            <div><label>默认每批并发</label><input type="number" id="o-concurrency" value="3" min="1"></div>
+            <div><label>依赖满足条件</label>
+              <select id="o-dep-policy">
+                <option value="passed" selected>依赖必须通过</option>
+                <option value="completed">依赖跑完即可（允许失败）</option>
+                <option value="any">不校验依赖结果</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid cols-2 mt">
+            <div><label>依赖的用例被跳过时</label>
+              <select id="o-on-skipped">
+                <option value="block" selected>阻断本用例</option>
+                <option value="run">仍然执行本用例</option>
+              </select>
+            </div>
+            <div><label>批内有用例失败时</label>
+              <select id="o-on-failure">
+                <option value="continue" selected>继续执行本批其余用例</option>
+                <option value="abort_batch">中止本批（其余标注依赖未满足）</option>
+              </select>
+            </div>
+          </div>
+          <div id="batch-config" class="mt"></div>
+
+          <div class="row mt">
+            <button class="btn secondary small" type="button" id="btn-validate-orc">校验编排配置</button>
+            <span id="orc-validate-msg" class="muted-small"></span>
+          </div>
+        </div>
+      </div>
+
       <div class="row mt">
         <button class="btn" id="btn-save">保存</button>
         <button class="btn secondary" id="btn-cancel">取消</button>
@@ -70,6 +166,11 @@ let projectId = null;
 let suites = [];
 let allCases = [];
 let editingId = null;
+let orc = null;            // 正在编辑的编排配置（null 表示未启用）
+let setupSteps = [];
+let teardownSteps = [];
+let manualBatches = [];    // 手工分批 [{name, case_ids:[], concurrency}]
+let depMap = {};           // case_id -> [依赖 case_id]
 
 async function init() {
   const params = new URLSearchParams(location.search);
@@ -95,6 +196,7 @@ async function loadSuites() {
         <div class="row">
           <strong>${esc(s.name)}</strong>
           ${s.group ? `<span class="tag">${esc(s.group)}</span>` : ""}
+          ${s.orchestration && s.orchestration.enabled ? '<span class="badge violet">编排</span>' : ""}
           <span class="muted" style="font-size:13px">${s.case_count} 个用例</span>
         </div>
         <div class="row">
@@ -132,9 +234,195 @@ function renderCasePick(selectedIds) {
   const sel = new Set(selectedIds || []);
   $("#case-pick").innerHTML = allCases.length
     ? allCases.map(c => `<label><input type="checkbox" class="pick" value="${c.id}" ${sel.has(c.id)?"checked":""}
-        style="width:auto;margin-right:8px">${esc(c.name)}
+        style="width:auto;margin-right:8px" onchange="onPickChange()">${esc(c.name)}
         <span class="muted" style="font-size:12px">${priorityBadge(c.priority)}</span></label>`).join("")
     : '<div class="muted">暂无用例</div>';
+  renderDepEditor();
+}
+
+// 套件勾选的用例（编排只对这些生效）
+function selectedCaseIds() {
+  return $$(".pick").filter(c => c.checked).map(c => c.value);
+}
+
+function onPickChange() {
+  // 取消勾选时清掉相关依赖/分批归属
+  const keep = new Set(selectedCaseIds());
+  for (const cid of Object.keys(depMap)) {
+    if (!keep.has(cid)) delete depMap[cid];
+    else depMap[cid] = (depMap[cid] || []).filter(d => keep.has(d));
+  }
+  manualBatches.forEach(b => { b.case_ids = b.case_ids.filter(id => keep.has(id)); });
+  renderDepEditor();
+  renderBatchConfig();
+}
+
+// ---------- 编排：开关 ----------
+$("#o-enabled").onchange = () => {
+  $("#orc-panel").hidden = !$("#o-enabled").checked;
+  if ($("#o-enabled").checked && orc === null) orc = {};
+  renderOrcSteps(); renderDepEditor(); renderBatchConfig();
+};
+
+// ---------- 编排：前置/后置步骤 ----------
+function addOrcStep(phase, action) {
+  const base = { action, name: action };
+  if (action === "request") Object.assign(base, { method: "GET", url: "/api/health", save_as: "resp" });
+  if (action === "assert") Object.assign(base, { type: "equals", actual: "${resp.status}", expected: "200" });
+  if (action === "set") Object.assign(base, { key: "var", value: "1" });
+  if (action === "script") Object.assign(base, { expr: "1 + 1", save_as: "result" });
+  if (action === "sleep") Object.assign(base, { seconds: "0.1" });
+  (phase === "setup" ? setupSteps : teardownSteps).push(base);
+  renderOrcSteps();
+}
+function orcStepField(phase, i, key, val) { (phase==="setup"?setupSteps:teardownSteps)[i][key] = val; renderOrcSteps(true); }
+function orcStepType(phase, i, action) {
+  const arr = phase==="setup"?setupSteps:teardownSteps;
+  const name = arr[i].name;
+  arr[i] = { action, name };
+  if (action === "request") Object.assign(arr[i], { method: "GET", url: "/api/health", save_as: "resp" });
+  if (action === "assert") Object.assign(arr[i], { type: "equals", actual: "${resp.status}", expected: "200" });
+  if (action === "set") Object.assign(arr[i], { key: "var", value: "1" });
+  if (action === "script") Object.assign(arr[i], { expr: "1 + 1", save_as: "result" });
+  if (action === "sleep") Object.assign(arr[i], { seconds: "0.1" });
+  renderOrcSteps();
+}
+function removeOrcStep(phase, i) { (phase==="setup"?setupSteps:teardownSteps).splice(i,1); renderOrcSteps(); }
+
+function orcStepHTML(phase, s, i) {
+  const a = s.action;
+  const head = `<div class="row">
+    <span class="badge ${a}">${a}</span>
+    <input type="text" value="${esc(s.name||a)}" placeholder="动作名" oninput="orcStepField('${phase}',${i},'name',this.value)" style="max-width:160px">
+    <select onchange="orcStepType('${phase}',${i},this.value)" style="max-width:110px">
+      ${["request","assert","set","script","sleep"].map(t=>`<option ${t===a?"selected":""}>${t}</option>`).join("")}
+    </select>
+    <span style="flex:1"></span>
+    <button class="btn danger small" type="button" onclick="removeOrcStep('${phase}',${i})">删</button>
+  </div>`;
+  let body = "";
+  if (a==="request") body = `<div class="row mt">
+    <select onchange="orcStepField('${phase}',${i},'method',this.value)" style="max-width:90px">
+      ${["GET","POST","PUT","DELETE"].map(m=>`<option ${m===s.method?"selected":""}>${m}</option>`).join("")}</select>
+    <input type="text" value="${esc(s.url||"")}" placeholder="/api/..." oninput="orcStepField('${phase}',${i},'url',this.value)">
+    <input type="text" value="${esc(s.save_as||"resp")}" placeholder="存为变量" style="max-width:100px" oninput="orcStepField('${phase}',${i},'save_as',this.value)">
+  </div>`;
+  else if (a==="assert") body = `<div class="row mt">
+    <select onchange="orcStepField('${phase}',${i},'type',this.value)" style="max-width:120px">
+      ${["equals","status","contains","truthy","gt","gte","regex","between"].map(t=>`<option ${t===s.type?"selected":""}>${t}</option>`).join("")}</select>
+    <input type="text" value="${esc(s.actual||"")}" placeholder="实际 ${"${resp.status}"}" oninput="orcStepField('${phase}',${i},'actual',this.value)">
+    <input type="text" value="${esc(s.expected||"")}" placeholder="期望 200" oninput="orcStepField('${phase}',${i},'expected',this.value)">
+  </div>`;
+  else if (a==="set") body = `<div class="row mt">
+    <input type="text" value="${esc(s.key||"")}" placeholder="变量名" style="max-width:140px" oninput="orcStepField('${phase}',${i},'key',this.value)">
+    <input type="text" value="${esc(s.value||"")}" placeholder="值" oninput="orcStepField('${phase}',${i},'value',this.value)"></div>`;
+  else if (a==="script") body = `<div class="row mt">
+    <input type="text" value="${esc(s.expr||"")}" placeholder="表达式 1+1" oninput="orcStepField('${phase}',${i},'expr',this.value)">
+    <input type="text" value="${esc(s.save_as||"")}" placeholder="存为" style="max-width:120px" oninput="orcStepField('${phase}',${i},'save_as',this.value)"></div>`;
+  else if (a==="sleep") body = `<div class="row mt"><input type="text" value="${esc(s.seconds||"0.1")}" placeholder="秒" style="max-width:100px" oninput="orcStepField('${phase}',${i},'seconds',this.value)"></div>`;
+  return `<div class="orc-step">${head}${body}</div>`;
+}
+
+function serializeOrcSteps(arr) {
+  return arr.map(s => {
+    const out = { action: s.action, name: s.name || s.action };
+    if (s.action==="request") Object.assign(out,{method:s.method,url:s.url||"/",save_as:s.save_as||"resp"});
+    if (s.action==="assert") Object.assign(out,{type:s.type||"equals",actual:parseLiteral(s.actual??""),expected:parseLiteral(s.expected??"")});
+    if (s.action==="set") Object.assign(out,{key:s.key||"var",value:parseLiteral(s.value??"")});
+    if (s.action==="script") Object.assign(out,{expr:s.expr||"",save_as:s.save_as||""});
+    if (s.action==="sleep") Object.assign(out,{seconds:parseFloat(s.seconds||"0.1")});
+    return out;
+  });
+}
+
+function renderOrcSteps(keepInput) {
+  if (keepInput) return;  // 字段输入时只更新数据，不重绘（避免打断输入）
+  $("#setup-list").innerHTML = setupSteps.length
+    ? setupSteps.map((s,i)=>orcStepHTML("setup",s,i)).join("")
+    : '<div class="muted-small">无前置动作</div>';
+  $("#teardown-list").innerHTML = teardownSteps.length
+    ? teardownSteps.map((s,i)=>orcStepHTML("teardown",s,i)).join("")
+    : '<div class="muted-small">无后置动作</div>';
+}
+
+// ---------- 编排：依赖 ----------
+function toggleDep(cid, dep) {
+  const list = depMap[cid] || (depMap[cid] = []);
+  const idx = list.indexOf(dep);
+  if (idx >= 0) list.splice(idx, 1); else list.push(dep);
+  renderDepEditor();
+}
+
+function renderDepEditor() {
+  const host = $("#dep-editor");
+  if (!host) return;
+  const ids = selectedCaseIds();
+  const byId = Object.fromEntries(allCases.map(c => [c.id, c]));
+  if (!ids.length) { host.innerHTML = '<div class="muted">请先选择用例</div>'; return; }
+  host.innerHTML = ids.map(cid => {
+    const c = byId[cid];
+    const deps = depMap[cid] || [];
+    const options = ids.filter(d => d !== cid).map(d => `
+      <span class="dep-chip ${deps.includes(d)?"on":""}" onclick="toggleDep('${cid}','${d}')">${esc(byId[d].name)}</span>`).join("");
+    return `<div class="dep-row"><span class="dep-title">${esc(c.name)}</span>
+      <span class="muted-small">依赖：</span><span>${options || '<span class="muted-small">无</span>'}</span></div>`;
+  }).join("");
+}
+
+// ---------- 编排：分批配置 ----------
+function renderBatchConfig() {
+  const host = $("#batch-config");
+  if (!host) return;
+  const mode = $("#o-batch-mode").value;
+  const ids = selectedCaseIds();
+  const byId = Object.fromEntries(allCases.map(c => [c.id, c]));
+  if (mode === "all") {
+    host.innerHTML = '<p class="muted-small">所有选中用例在同一批内按依赖门控并发执行。</p>';
+  } else if (mode === "priority") {
+    const groups = {};
+    ids.forEach(id => { const p = byId[id].priority || "P3"; (groups[p] ||= []).push(byId[id].name); });
+    host.innerHTML = '<p class="muted-small">将按优先级从高到低分成 ' +
+      Object.keys(groups).sort().map(p => `${p}(${groups[p].length})`).join("、") +
+      ' 批，批次串行、批内并发。</p>';
+  } else if (mode === "tag") {
+    host.innerHTML = '<p class="muted-small">每个标签成一批，批次串行；有用例的标签按出现顺序排列，无标签的归入「未分组」批。</p>';
+  } else if (mode === "manual") {
+    const assigned = new Set(manualBatches.flatMap(b => b.case_ids));
+    const unassigned = ids.filter(id => !assigned.has(id));
+    host.innerHTML = `
+      <label>手工分批（可设置每批并发）</label>
+      <div id="manual-batch-list">
+        ${manualBatches.map((b,bi)=>`
+        <div class="manual-batch">
+          <div class="row">
+            <input type="text" value="${esc(b.name)}" placeholder="批次名" oninput="manualBatches[${bi}].name=this.value" style="max-width:180px">
+            <label class="muted-small" style="font-weight:400">并发
+              <input type="number" min="1" value="${b.concurrency||3}" style="max-width:80px"
+                oninput="manualBatches[${bi}].concurrency=parseInt(this.value||'3',10)"></label>
+            <span style="flex:1"></span>
+            <button class="btn danger small" type="button" onclick="removeManualBatch(${bi})">删除该批</button>
+          </div>
+          <div class="mt">${b.case_ids.map(id=>{
+            const on = true;
+            return `<span class="dep-chip on" onclick="toggleManualCase(${bi},'${id}')">${esc(byId[id]?byId[id].name:id)} ✕</span>`;
+          }).join("") || '<span class="muted-small">从下方未分配用例中点选加入本批</span>'}</div>
+          <div class="mt muted-small">可加入：${unassigned.map(id=>`<span class="dep-chip" onclick="toggleManualCase(${bi},'${id}')">${esc(byId[id].name)}</span>`).join("") || '<span>（已全部分配）</span>'}</div>
+        </div>`).join("")}
+      </div>
+      <div class="mt"><button class="btn secondary small" type="button" onclick="addManualBatch()">+ 新增一批</button></div>
+      <p class="muted-small">未分配的用例（${unassigned.length} 个）会自动归入最后的「未分批」。</p>`;
+  }
+}
+
+function addManualBatch() { manualBatches.push({ name: `第 ${manualBatches.length+1} 批`, case_ids: [], concurrency: 3 }); renderBatchConfig(); }
+function removeManualBatch(bi) { manualBatches.splice(bi,1); renderBatchConfig(); }
+function toggleManualCase(bi, id) {
+  const b = manualBatches[bi];
+  const idx = b.case_ids.indexOf(id);
+  // 一个用例只能属于一个手工批
+  manualBatches.forEach(x => { x.case_ids = x.case_ids.filter(c => c !== id); });
+  if (idx < 0) b.case_ids.push(id);
+  renderBatchConfig();
 }
 
 async function runSuite(id) {
@@ -153,6 +441,7 @@ function newSuite() {
   $("#s-name").value = ""; $("#s-desc").value = ""; $("#s-group").value = "";
   $("#s-env").value = "";
   renderCasePick([]);
+  resetOrc(null);
   $("#edit-card").style.display = "block";
 }
 
@@ -164,7 +453,58 @@ function editSuite(id) {
   $("#s-name").value = s.name || ""; $("#s-desc").value = s.description || "";
   $("#s-group").value = s.group || ""; $("#s-env").value = s.env_id || "";
   renderCasePick(s.case_ids || []);
+  resetOrc(s.orchestration || null);
   $("#edit-card").style.display = "block";
+}
+
+function resetOrc(saved) {
+  orc = saved && saved.enabled ? { ...saved } : null;
+  setupSteps = saved && saved.setup ? saved.setup.map(x => ({ ...x })) : [];
+  teardownSteps = saved && saved.teardown ? saved.teardown.map(x => ({ ...x })) : [];
+  depMap = {};
+  manualBatches = [];
+  if (saved && saved.dependencies) {
+    saved.dependencies.forEach(d => { depMap[d.case_id] = [...(d.depends_on || [])]; });
+  }
+  const batching = (saved && saved.batching) || { mode: "all", concurrency: 3 };
+  $("#o-enabled").checked = !!(saved && saved.enabled);
+  $("#orc-panel").hidden = !(saved && saved.enabled);
+  $("#o-batch-mode").value = batching.mode || "all";
+  $("#o-concurrency").value = batching.concurrency || 3;
+  $("#o-dep-policy").value = saved?.dependency_policy || "passed";
+  $("#o-on-skipped").value = saved?.on_skipped || "block";
+  $("#o-on-failure").value = saved?.on_failure || "continue";
+  $("#o-teardown-policy").value = saved?.teardown_policy || "always";
+  if (batching.mode === "manual" && Array.isArray(batching.batches)) {
+    manualBatches = batching.batches.map(b => ({
+      name: b.name || "批次", case_ids: [...(b.case_ids || [])],
+      concurrency: b.concurrency || 3 }));
+  }
+  $("#orc-validate-msg").textContent = "";
+  renderOrcSteps(); renderDepEditor(); renderBatchConfig();
+}
+
+function serializeOrchestration() {
+  if (!$("#o-enabled").checked) return null;
+  const mode = $("#o-batch-mode").value;
+  const batching = { mode, concurrency: parseInt($("#o-concurrency").value || "3", 10) };
+  if (mode === "manual") batching.batches = manualBatches
+    .filter(b => b.case_ids.length)
+    .map(b => ({ name: b.name || "批次", case_ids: b.case_ids,
+                 concurrency: parseInt(b.concurrency || "3", 10) }));
+  return {
+    enabled: true,
+    setup: serializeOrcSteps(setupSteps),
+    teardown: serializeOrcSteps(teardownSteps),
+    teardown_policy: $("#o-teardown-policy").value,
+    dependencies: Object.entries(depMap)
+      .filter(([, deps]) => deps.length)
+      .map(([case_id, depends_on]) => ({ case_id, depends_on })),
+    dependency_policy: $("#o-dep-policy").value,
+    on_skipped: $("#o-on-skipped").value,
+    on_failure: $("#o-on-failure").value,
+    batching,
+  };
 }
 
 async function delSuite(id) {
@@ -180,9 +520,18 @@ $("#btn-cancel").onclick = () => { $("#edit-card").style.display = "none"; };
 $("#btn-save").onclick = async () => {
   const name = $("#s-name").value.trim();
   if (!name) return toast("请输入套件名称", "error");
-  const caseIds = $$(".pick").filter(c => c.checked).map(c => c.value);
+  const caseIds = selectedCaseIds();
+  const orchestration = serializeOrchestration();
   const body = { name, description: $("#s-desc").value, group: $("#s-group").value,
-    env_id: $("#s-env").value || null, case_ids: caseIds };
+    env_id: $("#s-env").value || null, case_ids: caseIds, orchestration };
+  if (orchestration && orchestration.enabled) {
+    // 保存前先校验编排（依赖环 / 未知依赖 / 分批）
+    try {
+      const v = await api("/api/suites/validate-orchestration",
+        { method: "POST", body: { case_ids: caseIds, orchestration } });
+      if (!v.ok) return toast("编排配置无效", "error");
+    } catch (e) { return toast("编排配置无效：" + e.message, "error"); }
+  }
   if (editingId) {
     await api(`/api/suites/${editingId}`, { method: "PUT", body });
     toast("已保存");
@@ -192,6 +541,21 @@ $("#btn-save").onclick = async () => {
   }
   $("#edit-card").style.display = "none";
   loadSuites();
+};
+
+$("#btn-validate-orc").onclick = async () => {
+  const msg = $("#orc-validate-msg");
+  msg.textContent = "校验中…"; msg.style.color = "var(--text-muted)";
+  try {
+    const v = await api("/api/suites/validate-orchestration", { method: "POST",
+      body: { case_ids: selectedCaseIds(), orchestration: serializeOrchestration() } });
+    const nb = (v.plan && v.plan.batches || []).length;
+    msg.textContent = `✓ 配置有效：${nb} 批，依赖 ${(v.plan.dependencies||[]).length} 条`;
+    msg.style.color = "var(--green)";
+  } catch (e) {
+    msg.textContent = "✗ " + e.message;
+    msg.style.color = "var(--red)";
+  }
 };
 
 init();

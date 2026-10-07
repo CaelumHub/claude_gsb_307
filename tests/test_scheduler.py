@@ -41,6 +41,11 @@ class TestSchedulerEndToEnd(unittest.TestCase):
         self.registry, self.builds, self.env_mgr, self.sched = _make_scheduler(self.tmp.name)
 
     def tearDown(self):
+        # 等所有后台构建彻底收尾（报告/覆盖率/通知写完）再清理临时目录，
+        # 否则 rmtree 可能与收尾线程的文件写入竞争导致偶发 OSError。
+        deadline = time.time() + 15
+        while time.time() < deadline and self.sched.running():
+            time.sleep(0.02)
         self.sched.shutdown()
         self.tmp.cleanup()
 
@@ -117,6 +122,11 @@ class TestSchedulerEndToEnd(unittest.TestCase):
             time.sleep(0.05)
         b = self.builds.for_project(pid).get(build_id)
         self.assertIn(b["status"], ("cancelled", "passed", "failed"))
+        # 等待收尾（报告/覆盖率写入）彻底结束，避免清理临时目录时仍有写线程
+        deadline2 = time.time() + 10
+        while time.time() < deadline2 and any(r["build_id"] == build_id
+                                             for r in self.sched.running()):
+            time.sleep(0.02)
 
     def test_schedule_fires_once_per_minute(self):
         pid, suite = self._setup_project(3)

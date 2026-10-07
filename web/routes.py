@@ -279,6 +279,7 @@ def create_suite(project_id: str):
         "group": data.get("group", ""),
         "case_ids": data.get("case_ids") or [],
         "env_id": data.get("env_id"),
+        "orchestration": data.get("orchestration") or None,
         "created_at": time.time(),
     }
     _store("suites").insert(suite)
@@ -301,6 +302,8 @@ def update_suite(suite_id: str):
     data = _payload()
     patch = {k: data[k] for k in ("name", "description", "group", "case_ids", "env_id")
              if k in data}
+    if "orchestration" in data:
+        patch["orchestration"] = data.get("orchestration") or None
     updated = _store("suites").update(suite_id, patch)
     return jsonify(updated)
 
@@ -324,6 +327,24 @@ def list_groups(project_id: str):
             for t in tags:
                 groups[t] = groups.get(t, 0) + 1
     return jsonify({"groups": [{"name": k, "count": v} for k, v in sorted(groups.items())]})
+
+
+@api.post("/suites/validate-orchestration")
+def validate_orchestration():
+    """校验编排配置（依赖环 / 未知依赖 / 分批），返回规范化后的计划预览。"""
+    from engine.orchestration import PlanError, normalize_plan
+    data = _payload()
+    case_ids = data.get("case_ids") or []
+    cases = _store("cases").get_many(case_ids)
+    by_id = {c.get("id"): c for c in cases}
+    ordered = [by_id[cid] for cid in case_ids if cid in by_id]
+    try:
+        plan = normalize_plan(data.get("orchestration") or {}, ordered,
+                              _scheduler().max_case_workers)
+    except PlanError as exc:
+        return _err(str(exc))
+    from engine.orchestration import describe_plan
+    return jsonify({"ok": True, "plan": describe_plan(plan)})
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +437,17 @@ def case_log(build_id: str, case_id: str):
         return err
     store = _builds().for_project(build["project_id"])
     return jsonify({"case_id": case_id, "log": store.read_case_log(build_id, case_id)})
+
+
+@api.get("/builds/<build_id>/timeline")
+def build_timeline(build_id: str):
+    """编排时间线：前置/后置动作、每一批、每个用例的逐步推进事件。"""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    store = _builds().for_project(build["project_id"])
+    return jsonify({"build_id": build_id, "plan": build.get("plan"),
+                    "events": store.read_timeline(build_id)})
 
 
 @api.delete("/builds/<build_id>")
