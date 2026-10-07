@@ -15,7 +15,7 @@ from typing import Optional
 
 from flask import Blueprint, current_app, jsonify, request
 
-from engine import new_id
+from engine import new_id, validate_orchestration, build_plan
 from engine.executor import TestExecutor
 
 api = Blueprint("api", __name__, url_prefix="/api")
@@ -271,6 +271,11 @@ def create_suite(project_id: str):
     name = (data.get("name") or "").strip()
     if not name:
         return _err("套件名称不能为空")
+    orchestration = data.get("orchestration")
+    if orchestration:
+        errors = validate_orchestration(orchestration, data.get("case_ids") or [])
+        if errors:
+            return _err("编排配置不合法：" + "；".join(errors))
     suite = {
         "id": new_id("suite"),
         "project_id": project_id,
@@ -279,6 +284,7 @@ def create_suite(project_id: str):
         "group": data.get("group", ""),
         "case_ids": data.get("case_ids") or [],
         "env_id": data.get("env_id"),
+        "orchestration": orchestration or {},
         "created_at": time.time(),
     }
     _store("suites").insert(suite)
@@ -299,10 +305,43 @@ def update_suite(suite_id: str):
     if suite is None:
         return _err("套件不存在", 404)
     data = _payload()
-    patch = {k: data[k] for k in ("name", "description", "group", "case_ids", "env_id")
-             if k in data}
+    patch = {k: data[k] for k in ("name", "description", "group", "case_ids",
+                                  "env_id", "orchestration") if k in data}
+    if "orchestration" in patch:
+        case_ids = patch.get("case_ids", suite.get("case_ids") or [])
+        orch = patch["orchestration"] or {}
+        errors = validate_orchestration(orch, case_ids)
+        if errors:
+            return _err("编排配置不合法：" + "；".join(errors))
+        patch["orchestration"] = orch
     updated = _store("suites").update(suite_id, patch)
     return jsonify(updated)
+
+
+@api.post("/suites/validate-orchestration")
+def validate_suite_orchestration():
+    """校验编排配置并返回计划预览（批次划分 / 依赖问题），供编辑器即时反馈。"""
+    data = _payload()
+    orch = data.get("orchestration") or {}
+    case_ids = data.get("case_ids") or []
+    errors = validate_orchestration(orch, case_ids)
+    cases = _store("cases").get_many(case_ids)
+    plan = build_plan(cases, orch, 8)
+    batches = []
+    name_of = {c.get("id"): c.get("name") for c in cases}
+    for b in plan.batches:
+        batches.append({
+            "name": b.name,
+            "concurrency": b.concurrency,
+            "case_count": len(b.case_ids),
+            "cases": [name_of.get(cid, cid) for cid in b.case_ids],
+        })
+    return jsonify({
+        "ok": not errors,
+        "errors": errors,
+        "batches": batches,
+        "problems": plan.problems,
+    })
 
 
 @api.delete("/suites/<suite_id>")
@@ -407,6 +446,20 @@ def build_logs(build_id: str):
     store = _builds().for_project(build["project_id"])
     after = request.args.get("after", 0, type=int)
     return jsonify(store.read_logs(build_id, after=after))
+
+
+@api.get("/builds/<build_id>/orchestration")
+def build_orchestration(build_id: str):
+    """构建的编排步骤实时状态（前置动作 / 各批次 / 后置动作）。"""
+    build, err = _build_or_404(build_id)
+    if err:
+        return err
+    store = _builds().for_project(build["project_id"])
+    data = store.read_orchestration(build_id)
+    if not data:
+        return jsonify({"enabled": False, "steps": []})
+    data["enabled"] = bool(data.get("steps"))
+    return jsonify(data)
 
 
 @api.get("/builds/<build_id>/cases/<case_id>/log")

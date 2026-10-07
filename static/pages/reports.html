@@ -130,6 +130,8 @@ function renderReport(r) {
     </div>
     <div class="mt row">
       ${statusBadge(r.status)}
+      ${s.dep_skipped ? `<span class="badge violet">依赖跳过 ${s.dep_skipped}</span>` : ""}
+      ${(s.skipped||0) > (s.dep_skipped||0) ? `<span class="badge skipped">普通跳过 ${s.skipped - (s.dep_skipped||0)}</span>` : ""}
       <span class="muted" style="font-size:13px">触发 ${esc(r.trigger||'manual')} · ${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</span>
     </div>
     <div class="mt grid cols-4">

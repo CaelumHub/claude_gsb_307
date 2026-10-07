@@ -86,6 +86,7 @@ class ReportGenerator:
                 "error": error,
                 "skipped": skipped,
                 "timeout": timeout,
+                "dep_skipped": build.get("dep_skipped", 0),
                 "pass_rate": pass_rate,
             },
             "durations": {

@@ -102,6 +102,10 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         {"action": "set", "key": "text", "value": "release-2.31.0", "name": "设置文本"},
         {"action": "assert", "type": "regex", "actual": "${text}", "expected": r"^\d+\.\d+", "name": "匹配版本号"},
     ])
+    c9 = _case("错误注入后的联动校验", "P2", ["chaos"], [
+        {"action": "request", "method": "GET", "url": "/api/health", "name": "复查健康检查"},
+        {"action": "assert", "type": "status", "actual": "${resp.status}", "expected": 200, "name": "状态码 200"},
+    ])
 
     suite = {
         "id": new_id("suite"),
@@ -110,7 +114,28 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "description": "核心链路冒烟",
         "group": "smoke",
         "env_id": env["id"],
-        "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8],
+        "case_ids": [c1, c2, c3, c4, c5, c6, c7, c8, c9],
+        # 套件编排：前置准备数据 → 冒烟批次先行 → 其余批次 → 后置清理；
+        # 用例依赖：查用户/建项目依赖登录先通过；c9 依赖必失败的 c6，
+        # 用于演示「依赖未满足而跳过」与普通跳过的区分。
+        "orchestration": {
+            "setup": [
+                {"action": "set", "key": "suite_token", "value": "demo-token", "name": "准备套件级令牌"},
+                {"action": "request", "method": "POST", "url": "/api/setup", "name": "准备测试数据"},
+            ],
+            "teardown": [
+                {"action": "request", "method": "POST", "url": "/api/cleanup", "name": "清理测试数据"},
+            ],
+            "dependencies": {
+                c3: [c2],
+                c4: [c2],
+                c9: [c6],
+            },
+            "batches": [
+                {"name": "冒烟先行", "tags": ["smoke"], "concurrency": 2},
+                {"name": "其余用例", "rest": True, "concurrency": 4},
+            ],
+        },
         "created_at": time.time(),
     }
     registry.store("suites").insert(suite)

@@ -5,12 +5,21 @@
 
 1. **构建级并发**：一个线程池（``build_pool``）承载多场同时进行的构建，
    用 ``max_build_workers`` 限制并发构建数，避免磁盘/CPU 被打满；
-2. **用例级并发**：每场构建内部再用一个线程池（``case_pool``）并发跑
-   用例，用 ``max_case_workers`` 限制单构建内的并发度；结果通过
+2. **用例级并发**：每场构建内部按编排计划分批推进，批次之间串行、批次
+   内部用线程池并发，并发度取批次自己的 ``concurrency``；批内再按用例
+   依赖做「波次调度」——依赖全部通过的用例才入池，依赖失败/跳过的用例
+   直接以 ``dependency_unmet`` 跳过；结果通过
    :meth:`storage.buildstore.BuildStore.record_result` 在文件锁保护下
    并发安全地收集与聚合；
 3. **定时触发**：一个后台循环线程按 ``tick`` 间隔扫描启用的定时计划，
    命中 cron 且本分钟尚未触发过就提交新构建，防止同一分钟重复触发。
+
+编排：套件可声明前置/后置动作（setup/teardown）、用例依赖与分批规则，
+见 :mod:`engine.orchestrator`。前置失败则整场不再执行用例（全部以
+``setup_failed`` 跳过）；后置动作用于清理现场，无论成败、甚至构建被
+取消都会执行（受其自身超时约束）。编排的每一步通过
+:class:`~engine.orchestrator.OrchestrationTracker` 落盘并写进构建日志，
+监控页实时可见。
 
 取消：每个构建持有一个 ``threading.Event``，用例执行器在步骤之间检查它，
 取消后已在跑或用例尽快中止、未跑的不再启动，最终构建标为 ``cancelled``。
@@ -19,13 +28,17 @@
 from __future__ import annotations
 
 import datetime
+import itertools
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Optional
 
 from .cron import cron_matches, parse_cron
 from .models import new_id
+from .orchestrator import (SKIP_CANCELLED, SKIP_DEPENDENCY, SKIP_SETUP_FAILED,
+                           STATUS_LABELS, OrchestrationTracker, Plan,
+                           build_plan)
 
 
 class Scheduler:
@@ -112,7 +125,8 @@ class Scheduler:
             }
 
         self._build_pool.submit(
-            self._run_build, project_id, build_id, cases, env_id, cancel_event)
+            self._run_build, project_id, build_id, suite, cases, env_id,
+            cancel_event)
 
         # 若是定时触发，记录一次计划运行历史
         if schedule_id:
@@ -145,58 +159,43 @@ class Scheduler:
         return out
 
     # ------------------------------------------------------------------ 构建执行
-    def _run_build(self, project_id: str, build_id: str, cases: list,
-                   env_id: str, cancel_event: threading.Event) -> None:
+    def _run_build(self, project_id: str, build_id: str, suite: dict,
+                   cases: list, env_id: str, cancel_event: threading.Event) -> None:
         store = self.builds.for_project(project_id)
         env_config = self.env_manager.to_executor_config(env_id)
         store.set_total(build_id, len(cases))
         store.append_log(build_id, f"构建 {build_id} 开始，共 {len(cases)} 个用例，"
                                    f"环境 {env_id}")
 
-        case_workers = max(1, min(self.max_case_workers, len(cases)))
-        try:
-            with ThreadPoolExecutor(max_workers=case_workers,
-                                    thread_name_prefix=f"case-{build_id[:6]}") as pool:
-                futures = {}
-                for i, case in enumerate(cases):
-                    if cancel_event.is_set():
-                        break
-                    futures[pool.submit(
-                        self._run_one, case, env_config, env_id, i,
-                        cancel_event)] = case
+        plan = build_plan(cases, (suite or {}).get("orchestration"),
+                          self.max_case_workers)
+        tracker = OrchestrationTracker(store, build_id, plan)
+        tracker.begin()
 
-                for future in as_completed(futures):
-                    case = futures[future]
-                    try:
-                        result = future.result()
-                    except Exception as exc:  # noqa: BLE001
-                        result = {
-                            "case_id": case.get("id"),
-                            "case_name": case.get("name", "未命名用例"),
-                            "group": (case.get("tags") or ["默认"])[0],
-                            "priority": case.get("priority", "P3"),
-                            "status": "error",
-                            "duration": 0.0,
-                            "steps": [],
-                            "assertions": [],
-                            "logs": [f"用例执行异常: {exc}"],
-                        }
-                    self._persist_result(store, build_id, case, result)
-                # 未提交的用例（被取消跳过）记为 skipped
-                submitted = {case.get("id") for case in futures.values()}
-                for case in cases:
-                    if case.get("id") not in submitted:
-                        skipped = {
-                            "case_id": case.get("id"),
-                            "case_name": case.get("name", "未命名用例"),
-                            "group": (case.get("tags") or ["默认"])[0],
-                            "priority": case.get("priority", "P3"),
-                            "status": "skipped",
-                            "duration": 0.0,
-                            "steps": [], "assertions": [],
-                            "logs": ["因取消而未执行"],
-                        }
-                        self._persist_result(store, build_id, case, skipped)
+        setup_ok = True
+        teardown_ok = True
+        try:
+            # 1) 前置动作：准备数据；失败则整场不再浪费用例执行
+            if plan.setup:
+                setup_ok = self._run_hook(store, build_id, "setup", plan,
+                                          env_config, cancel_event, tracker)
+
+            # 2) 按批次跑用例（批内依赖波次调度）
+            if cancel_event.is_set():
+                self._skip_all(store, build_id, plan, cases, tracker,
+                               SKIP_CANCELLED, "构建已取消，未执行")
+            elif not setup_ok:
+                self._skip_all(store, build_id, plan, cases, tracker,
+                               SKIP_SETUP_FAILED, "前置动作失败，用例未执行")
+            else:
+                self._run_batches(store, build_id, plan, cases, env_config,
+                                  env_id, cancel_event, tracker)
+
+            # 3) 后置动作：清理现场。即使构建被取消也要执行（不传取消事件，
+            #    由 hook 自身超时兜底），避免取消后现场残留。
+            if plan.teardown:
+                teardown_ok = self._run_hook(store, build_id, "teardown", plan,
+                                             env_config, None, tracker)
         except Exception as exc:  # noqa: BLE001
             store.append_log(build_id, f"构建执行异常: {exc}")
 
@@ -204,6 +203,8 @@ class Scheduler:
         build = store.get(build_id)
         if cancel_event.is_set():
             status = "cancelled"
+        elif not setup_ok or not teardown_ok:
+            status = "error"
         elif (build.get("failed", 0) + build.get("error", 0) + build.get("timeout", 0)) == 0:
             status = "passed"
         else:
@@ -218,8 +219,241 @@ class Scheduler:
         with self._running_lock:
             self._running.pop(build_id, None)
 
+    # ------------------------------------------------------------------ 编排执行
+    def _run_hook(self, store, build_id: str, kind: str, plan: Plan,
+                  env_config: dict, cancel_event, tracker: OrchestrationTracker) -> bool:
+        """执行前置 / 后置动作（复用执行器的步骤语义），返回是否全部通过。"""
+        label = "前置动作" if kind == "setup" else "后置动作"
+        steps = plan.setup if kind == "setup" else plan.teardown
+        tracker.start(kind)
+        pseudo = {"id": f"__{kind}__", "name": label, "steps": steps,
+                  "timeout": plan.hook_timeout}
+        result = self.executor.execute_case(
+            pseudo, env_config, cancel_event=cancel_event,
+            timeout=plan.hook_timeout)
+        done_steps = result.get("steps", [])
+        for i, step_result in enumerate(done_steps):
+            tracker.record(f"{kind}.{i}", step_result.get("status", "error"),
+                           step_result.get("message", ""),
+                           step_result.get("duration", 0.0))
+        for i in range(len(done_steps), len(steps)):
+            tracker.record(f"{kind}.{i}", "skipped", "未执行")
+        ok = result.get("status") == "passed"
+        tracker.finish(kind, "passed" if ok else "failed",
+                       "" if ok else (result.get("message") or "有步骤未通过"))
+        for line in result.get("logs", []):
+            store.append_log(build_id, f"[{label}] {line}")
+        return ok
+
+    def _run_batches(self, store, build_id: str, plan: Plan, cases: list,
+                     env_config: dict, env_id: str,
+                     cancel_event: threading.Event,
+                     tracker: OrchestrationTracker) -> None:
+        cases_by_id = {c.get("id"): c for c in cases}
+        results: dict[str, dict] = {}  # case_id -> 结果（跨批次共享，依赖判定用）
+        order = itertools.count()
+
+        # 计划期已判定无法执行的用例（依赖成环 / 依赖排在后续批次）：
+        # 直接记为依赖未满足跳过，不再空等
+        for cid, reason in plan.problems.items():
+            case = cases_by_id.get(cid)
+            if case is None:
+                continue
+            result = self._skip_result(case, SKIP_DEPENDENCY, reason)
+            result["order"] = next(order)
+            self._persist_result(store, build_id, case, result)
+            results[cid] = result
+            store.append_log(build_id,
+                             f"[编排] 用例「{case.get('name')}」{reason}，跳过")
+
+        for index, batch in enumerate(plan.batches):
+            step_id = f"batch.{index}"
+            if cancel_event.is_set():
+                tracker.start(step_id)
+                for cid in batch.case_ids:
+                    if cid in results:
+                        continue
+                    case = cases_by_id[cid]
+                    result = self._skip_result(case, SKIP_CANCELLED,
+                                               "构建已取消，未执行")
+                    result["order"] = next(order)
+                    self._persist_result(store, build_id, case, result)
+                    results[cid] = result
+                tracker.progress(step_id, **self._batch_counts(batch, results))
+                tracker.finish(step_id, "skipped", "构建已取消")
+                continue
+            self._run_batch(store, build_id, plan, batch, index, cases_by_id,
+                            results, env_config, env_id, cancel_event,
+                            tracker, order)
+
+    def _run_batch(self, store, build_id: str, plan: Plan, batch, index: int,
+                   cases_by_id: dict, results: dict, env_config: dict,
+                   env_id: str, cancel_event: threading.Event,
+                   tracker: OrchestrationTracker, order) -> None:
+        """波次调度：依赖全部通过的用例才入池；依赖失败/跳过的立即标记。
+
+        每收到一个结果就重新评估等待中的用例，依赖链（A→B→C）会随上一环
+        完成而逐环放行，批内并发度始终不超过 ``batch.concurrency``。
+        """
+        step_id = f"batch.{index}"
+        tracker.start(step_id)
+        tracker.progress(step_id, **self._batch_counts(batch, results))
+        pending = {cid for cid in batch.case_ids if cid not in results}
+        futures: dict = {}
+
+        def persist(case: dict, result: dict) -> None:
+            self._persist_result(store, build_id, case, result)
+            results[case.get("id")] = result
+            tracker.progress(step_id, **self._batch_counts(batch, results))
+
+        try:
+            with ThreadPoolExecutor(
+                    max_workers=batch.concurrency,
+                    thread_name_prefix=f"case-{build_id[:6]}") as pool:
+                while pending or futures:
+                    if cancel_event.is_set():
+                        # 未开始的用例记为取消跳过；已在跑的继续等它收尾
+                        for cid in sorted(pending):
+                            case = cases_by_id[cid]
+                            result = self._skip_result(
+                                case, SKIP_CANCELLED, "构建已取消，未执行")
+                            result["order"] = next(order)
+                            persist(case, result)
+                        pending.clear()
+                    else:
+                        for cid in sorted(pending):
+                            dep_ids = plan.dependencies.get(cid, [])
+                            unmet = [d for d in dep_ids
+                                     if d in results and results[d].get("status") != "passed"]
+                            waiting = [d for d in dep_ids if d not in results]
+                            if unmet:
+                                case = cases_by_id[cid]
+                                names = "、".join(
+                                    f"「{cases_by_id.get(d, {}).get('name', d)}」"
+                                    f"（{STATUS_LABELS.get(results[d].get('status'), results[d].get('status'))}）"
+                                    for d in unmet)
+                                msg = f"依赖未满足：{names}"
+                                store.append_log(
+                                    build_id,
+                                    f"[编排] 用例「{case.get('name')}」{msg}，跳过")
+                                result = self._skip_result(case, SKIP_DEPENDENCY, msg)
+                                result["order"] = next(order)
+                                persist(case, result)
+                                pending.discard(cid)
+                            elif not waiting:
+                                case = cases_by_id[cid]
+                                futures[pool.submit(
+                                    self._run_one, case, env_config, env_id,
+                                    next(order), cancel_event)] = case
+                                pending.discard(cid)
+                    if not futures:
+                        if pending:
+                            # 安全网：计划期已排除环与跨批次倒置，理论不可达
+                            for cid in sorted(pending):
+                                case = cases_by_id[cid]
+                                result = self._skip_result(
+                                    case, SKIP_DEPENDENCY, "依赖关系无法解析，跳过")
+                                result["order"] = next(order)
+                                persist(case, result)
+                            pending.clear()
+                        break
+                    done, _ = wait(list(futures), timeout=0.5,
+                                   return_when=FIRST_COMPLETED)
+                    for future in done:
+                        case = futures.pop(future)
+                        try:
+                            result = future.result()
+                        except Exception as exc:  # noqa: BLE001
+                            result = {
+                                "case_id": case.get("id"),
+                                "case_name": case.get("name", "未命名用例"),
+                                "group": (case.get("tags") or ["默认"])[0],
+                                "priority": case.get("priority", "P3"),
+                                "status": "error",
+                                "duration": 0.0,
+                                "steps": [], "assertions": [],
+                                "logs": [f"用例执行异常: {exc}"],
+                            }
+                        persist(case, result)
+        except Exception as exc:  # noqa: BLE001
+            tracker.finish(step_id, "error", str(exc))
+            raise
+
+        counts = self._batch_counts(batch, results)
+        if cancel_event.is_set():
+            batch_status = "cancelled"
+        elif counts["done"] < counts["total"]:
+            batch_status = "skipped"
+        elif counts["failed"]:
+            batch_status = "failed"
+        else:
+            batch_status = "passed"
+        tracker.finish(step_id, batch_status,
+                       f"通过 {counts['passed']}/{counts['total']}"
+                       + (f"，跳过 {counts['skipped']}" if counts["skipped"] else ""))
+
+    @staticmethod
+    def _batch_counts(batch, results: dict) -> dict:
+        counts = {"total": len(batch.case_ids), "done": 0,
+                  "passed": 0, "failed": 0, "skipped": 0}
+        for cid in batch.case_ids:
+            result = results.get(cid)
+            if result is None:
+                continue
+            counts["done"] += 1
+            status = result.get("status")
+            if status == "passed":
+                counts["passed"] += 1
+            elif status == "skipped":
+                counts["skipped"] += 1
+            else:
+                counts["failed"] += 1
+        return counts
+
+    @staticmethod
+    def _skip_result(case: dict, reason: str, message: str) -> dict:
+        """构造一条「未执行」的跳过结果，skip_reason 标明跳过原因。"""
+        return {
+            "case_id": case.get("id"),
+            "case_name": case.get("name", "未命名用例"),
+            "group": (case.get("tags") or ["默认"])[0],
+            "priority": case.get("priority", "P3"),
+            "status": "skipped",
+            "skip_reason": reason,
+            "duration": 0.0,
+            "steps": [], "assertions": [],
+            "logs": [message],
+            "message": message,
+        }
+
+    def _skip_all(self, store, build_id: str, plan: Plan, cases: list,
+                  tracker: OrchestrationTracker, reason: str, message: str) -> None:
+        """整场不再执行用例（前置失败 / 已取消）：全部记为跳过并标注原因。"""
+        cases_by_id = {c.get("id"): c for c in cases}
+        results: dict[str, dict] = {}
+        order = itertools.count()
+        for index, batch in enumerate(plan.batches):
+            step_id = f"batch.{index}"
+            tracker.start(step_id)
+            for cid in batch.case_ids:
+                case = cases_by_id.get(cid)
+                if case is None:
+                    continue
+                result = self._skip_result(case, reason, message)
+                result["order"] = next(order)
+                self._persist_result(store, build_id, case, result)
+                results[cid] = result
+            tracker.progress(step_id, **self._batch_counts(batch, results))
+            tracker.finish(step_id, "skipped", message)
+
     def _run_one(self, case: dict, env_config: dict, env_id: str,
                  index: int, cancel_event: threading.Event) -> dict:
+        # 在线程池里排队期间构建被取消：尚未开始，记为取消跳过而非执行中断
+        if cancel_event is not None and cancel_event.is_set():
+            result = self._skip_result(case, SKIP_CANCELLED, "构建已取消，未执行")
+            result["env_id"] = env_id
+            result["order"] = index
+            return result
         result = self.executor.execute_case(
             case, env_config, cancel_event=cancel_event,
             timeout=case.get("timeout", 60))

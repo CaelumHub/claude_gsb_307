@@ -66,6 +66,7 @@ def _empty_build(build_id: str, project_id: str, **kw: Any) -> dict:
         "error": 0,
         "skipped": 0,
         "timeout": 0,
+        "dep_skipped": 0,
         "started_at": None,
         "finished_at": None,
         "duration": 0.0,
@@ -195,6 +196,9 @@ class BuildStore:
             status = result.get("status", "error")
             if status in ("passed", "failed", "error", "skipped", "timeout"):
                 build[status] = build.get(status, 0) + 1
+            # 依赖未满足的跳过单独计数，不与普通跳过（禁用 / 取消）混为一谈
+            if status == "skipped" and result.get("skip_reason") == "dependency_unmet":
+                build["dep_skipped"] = build.get("dep_skipped", 0) + 1
             build["durations"] = build.get("durations", []) + [result.get("duration", 0.0)]
 
             group = result.get("group") or "默认"
@@ -318,9 +322,12 @@ class BuildStore:
                 v = r
                 for part in order_by.split("."):
                     if not isinstance(v, dict):
-                        return ""
+                        return (1, "")
                     v = v.get(part)
-                return v if v is not None else ""
+                # None 排最后；不同类型之间按类型名分组，避免 str/int 混排崩溃
+                if v is None:
+                    return (1, "")
+                return (0, type(v).__name__, v)
             matched.sort(key=_key, reverse=(order == "desc"))
         if offset:
             matched = matched[offset:]
@@ -358,6 +365,17 @@ class BuildStore:
             if not ok:
                 return False
         return True
+
+    # -- 编排步骤（套件编排的实时状态，监控页轮询） -------------------------
+    def _orchestration_path(self, build_id: str) -> str:
+        return os.path.join(self._build_dir(build_id), "orchestration.json")
+
+    def write_orchestration(self, build_id: str, data: dict) -> None:
+        with FileLock(self._lock(build_id)):
+            atomic_write_json(self._orchestration_path(build_id), data)
+
+    def read_orchestration(self, build_id: str) -> Optional[dict]:
+        return read_json(self._orchestration_path(build_id), None)
 
     # -- 覆盖率 / 报告缓存 ------------------------------------------------
     def write_coverage(self, build_id: str, coverage: dict) -> None:

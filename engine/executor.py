@@ -376,10 +376,11 @@ class TestExecutor:
         steps_out: list[dict] = []
         assertions: list[dict] = []
         status = "passed"
+        skip_reason: Optional[str] = None
 
         if not case.get("enabled", True):
             return self._finalize(case, "skipped", steps_out, [], logs, started,
-                                  "用例已禁用")
+                                  "用例已禁用", skip_reason="disabled")
 
         steps = case.get("steps") or []
         for idx, step in enumerate(steps):
@@ -398,6 +399,7 @@ class TestExecutor:
                         f"{step_result['name']}: {step_result['message']}")
             if step_result["status"] == "skipped":
                 status = "skipped"
+                skip_reason = "step"
                 break
             if step_result["status"] in ("failed", "error"):
                 status = step_result["status"]
@@ -410,11 +412,13 @@ class TestExecutor:
             logs.append(f"用例总耗时超过 {timeout}s")
 
         assertions = variables.get("_assertions", [])
-        return self._finalize(case, status, steps_out, assertions, logs, started)
+        return self._finalize(case, status, steps_out, assertions, logs, started,
+                              skip_reason=skip_reason)
 
     def _finalize(self, case: dict, status: str, steps: list, assertions: list,
-                  logs: list, started: float, message: str = "") -> dict:
-        return {
+                  logs: list, started: float, message: str = "",
+                  skip_reason: Optional[str] = None) -> dict:
+        result = {
             "case_id": case.get("id"),
             "case_name": case.get("name", "未命名用例"),
             "group": (case.get("tags") or ["默认"])[0],
@@ -426,3 +430,8 @@ class TestExecutor:
             "logs": logs,
             "message": message,
         }
+        if skip_reason:
+            # 跳过原因：disabled / step / dependency_unmet / setup_failed /
+            # cancelled，监控页据此把「依赖未满足」与普通跳过区分开
+            result["skip_reason"] = skip_reason
+        return result

@@ -27,6 +27,15 @@ const STATUS_LABELS = {
   cancelled: "已取消", error: "错误", skipped: "跳过", timeout: "超时",
 };
 
+/* 跳过原因：依赖未满足的跳过必须与普通跳过（禁用 / 取消 / 用例内跳过）区分 */
+const SKIP_REASON_LABELS = {
+  disabled: "已禁用",
+  cancelled: "因取消跳过",
+  dependency_unmet: "依赖未满足",
+  setup_failed: "前置动作失败",
+  step: "用例内跳过",
+};
+
 const PRIORITY_LABELS = { P0: "P0 · 最高", P1: "P1 · 高", P2: "P2 · 中", P3: "P3 · 低" };
 
 /* ---------- 导航注入 ---------- */
@@ -113,6 +122,18 @@ function badge(status, label) {
 
 function statusBadge(status) {
   return badge(status, STATUS_LABELS[status] || status);
+}
+
+/* 用例结果徽章：依赖未满足的跳过用紫色「依赖跳过」单独标注 */
+function resultBadge(r) {
+  if (r && r.status === "skipped" && r.skip_reason === "dependency_unmet") {
+    return '<span class="badge violet">依赖跳过</span>';
+  }
+  return statusBadge(r && r.status);
+}
+
+function skipReasonLabel(reason) {
+  return SKIP_REASON_LABELS[reason] || reason || "";
 }
 
 function priorityBadge(p) {

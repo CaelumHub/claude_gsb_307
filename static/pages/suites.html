@@ -11,6 +11,12 @@
       border: 1px solid var(--border); font-size: 12px; margin: 2px; }
     .case-pick { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
     .case-pick label { display: block; font-weight: 400; color: var(--text); font-size: 14px; margin-bottom: 4px; }
+    .orch-box { border: 1px dashed var(--border); border-radius: 9px; padding: 12px 14px; }
+    .dep-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; }
+    .dep-row select { flex: 1; }
+    .batch-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+    .batch-row input, .batch-row select { max-width: 150px; }
+    .batch-row input[type=number] { max-width: 80px; }
   </style>
 </head>
 <body>
@@ -54,6 +60,31 @@
         <div><label>选择用例</label></div>
       </div>
       <div class="case-pick mt" id="case-pick"><div class="muted">加载用例…</div></div>
+
+      <!-- 套件编排：前置/后置动作 + 用例依赖 + 分批并发 -->
+      <div class="orch-box mt">
+        <h3 style="margin-top:0">套件编排（可选）</h3>
+        <div class="grid cols-2">
+          <div>
+            <label>前置动作（JSON 步骤数组，套件运行前执行，失败则整场不跑）</label>
+            <textarea id="s-setup" style="min-height:64px" placeholder='[{"action":"request","method":"POST","url":"/api/setup","name":"准备测试数据"}]'></textarea>
+          </div>
+          <div>
+            <label>后置动作（无论成败、取消都会执行，用于清理现场）</label>
+            <textarea id="s-teardown" style="min-height:64px" placeholder='[{"action":"request","method":"POST","url":"/api/cleanup","name":"清理测试数据"}]'></textarea>
+          </div>
+        </div>
+        <div class="mt">
+          <label>用例依赖（被依赖的用例通过后，当前用例才会执行；未满足则标记「依赖跳过」）</label>
+          <div id="dep-editor"><div class="muted" style="font-size:13px">先在上方勾选用例</div></div>
+        </div>
+        <div class="mt">
+          <label>分批执行（按声明顺序匹配，批次串行、批内按各自并发数并行；未配置的用例自动进兜底批次）</label>
+          <div id="batch-editor"></div>
+          <button class="btn small secondary" id="btn-add-batch" type="button">+ 添加批次</button>
+        </div>
+      </div>
+
       <div class="row mt">
         <button class="btn" id="btn-save">保存</button>
         <button class="btn secondary" id="btn-cancel">取消</button>
@@ -70,6 +101,8 @@ let projectId = null;
 let suites = [];
 let allCases = [];
 let editingId = null;
+let depMap = {};      // case_id -> [依赖的 case_id]
+let batchRows = [];   // [{name, tags, priorities, concurrency, rest}]
 
 async function init() {
   const params = new URLSearchParams(location.search);
@@ -89,13 +122,21 @@ async function loadSuites() {
   suites = d.suites || [];
   const host = $("#suite-list");
   if (!suites.length) { host.innerHTML = '<div class="empty">还没有套件，点击「新建套件」。</div>'; return; }
-  host.innerHTML = suites.map(s => `
+  host.innerHTML = suites.map(s => {
+    const o = s.orchestration || {};
+    const orchBits = [];
+    if ((o.setup||[]).length) orchBits.push("前置");
+    if ((o.batches||[]).length) orchBits.push(`${o.batches.length} 批次`);
+    if (o.dependencies && Object.keys(o.dependencies).length) orchBits.push(`${Object.keys(o.dependencies).length} 条依赖`);
+    if ((o.teardown||[]).length) orchBits.push("后置");
+    return `
     <div class="suite-item">
       <div class="row spread">
         <div class="row">
           <strong>${esc(s.name)}</strong>
           ${s.group ? `<span class="tag">${esc(s.group)}</span>` : ""}
           <span class="muted" style="font-size:13px">${s.case_count} 个用例</span>
+          ${orchBits.length ? `<span class="badge violet">编排: ${orchBits.join(" · ")}</span>` : ""}
         </div>
         <div class="row">
           <button class="btn small" onclick="runSuite('${s.id}')">▶ 执行</button>
@@ -104,7 +145,8 @@ async function loadSuites() {
         </div>
       </div>
       <div class="mt" style="font-size:13px">${(s.cases||[]).map(c => `<span class="case-chip">${esc(c.name)}</span>`).join("") || '<span class="muted">暂无用例</span>'}</div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 async function loadGroups() {
@@ -135,6 +177,108 @@ function renderCasePick(selectedIds) {
         style="width:auto;margin-right:8px">${esc(c.name)}
         <span class="muted" style="font-size:12px">${priorityBadge(c.priority)}</span></label>`).join("")
     : '<div class="muted">暂无用例</div>';
+  $$(".pick").forEach(cb => cb.addEventListener("change", renderDepEditor));
+  renderDepEditor();
+}
+
+/* ---------- 编排编辑器 ---------- */
+function pickedCaseIds() { return $$(".pick").filter(c => c.checked).map(c => c.value); }
+
+function renderDepEditor() {
+  const ids = pickedCaseIds();
+  const idSet = new Set(ids);
+  // 清理已取消勾选用例的依赖配置
+  Object.keys(depMap).forEach(k => { if (!idSet.has(k)) delete depMap[k]; });
+  Object.values(depMap).forEach(list => {
+    for (let i = list.length - 1; i >= 0; i--) if (!idSet.has(list[i])) list.splice(i, 1);
+  });
+  const host = $("#dep-editor");
+  if (!ids.length) { host.innerHTML = '<div class="muted" style="font-size:13px">先在上方勾选用例</div>'; return; }
+  const nameOf = id => (allCases.find(c => c.id === id) || {}).name || id;
+  host.innerHTML = ids.map(cid => {
+    const others = ids.filter(x => x !== cid);
+    const deps = depMap[cid] || [];
+    return `<div class="dep-row">
+      <span style="min-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(nameOf(cid))}</span>
+      <span class="muted" style="font-size:12px">依赖</span>
+      <select multiple size="${Math.min(3, others.length)}" data-dep-for="${cid}">
+        ${others.map(o => `<option value="${o}" ${deps.includes(o) ? "selected" : ""}>${esc(nameOf(o))}</option>`).join("")}
+      </select>
+    </div>`;
+  }).join("");
+  $$("select[data-dep-for]", host).forEach(sel => sel.addEventListener("change", () => {
+    depMap[sel.dataset.depFor] = Array.from(sel.selectedOptions).map(o => o.value);
+  }));
+}
+
+function renderBatchEditor() {
+  const host = $("#batch-editor");
+  host.innerHTML = batchRows.map((b, i) => `
+    <div class="batch-row">
+      <input type="text" placeholder="批次名" value="${esc(b.name || "")}" data-b="${i}" data-f="name">
+      <input type="text" placeholder="标签(逗号分隔)" value="${esc((b.tags || []).join(","))}" data-b="${i}" data-f="tags" ${b.rest ? "disabled" : ""}>
+      <input type="text" placeholder="优先级 如 P0,P1" value="${esc((b.priorities || []).join(","))}" data-b="${i}" data-f="priorities" ${b.rest ? "disabled" : ""}>
+      <input type="number" min="1" placeholder="并发" value="${b.concurrency || ""}" data-b="${i}" data-f="concurrency" title="本批次并发数">
+      <label style="margin:0;font-size:12px"><input type="checkbox" data-b="${i}" data-f="rest" ${b.rest ? "checked" : ""} style="width:auto"> 剩余批次</label>
+      <button class="btn small danger" type="button" data-del-batch="${i}">删</button>
+    </div>`).join("") || '<div class="muted" style="font-size:13px">未配置批次：全部用例一个批次、默认并发执行</div>';
+  $$("input[data-b]", host).forEach(el => el.addEventListener("change", () => {
+    const b = batchRows[+el.dataset.b], f = el.dataset.f;
+    if (f === "name") b.name = el.value;
+    else if (f === "tags" || f === "priorities") b[f] = el.value.split(",").map(s => s.trim()).filter(Boolean);
+    else if (f === "concurrency") b.concurrency = parseInt(el.value, 10) || null;
+    else if (f === "rest") b.rest = el.checked;
+    if (f === "rest") renderBatchEditor();
+  }));
+  $$("[data-del-batch]", host).forEach(el => el.addEventListener("click", () => {
+    batchRows.splice(+el.dataset.delBatch, 1);
+    renderBatchEditor();
+  }));
+}
+
+function parseStepsField(sel, label) {
+  const raw = $(sel).value.trim();
+  if (!raw) return [];
+  let v;
+  try { v = JSON.parse(raw); } catch (e) { throw new Error(`${label}不是合法 JSON：${e.message}`); }
+  if (!Array.isArray(v)) throw new Error(`${label}必须是步骤数组`);
+  return v;
+}
+
+function collectOrchestration() {
+  const orch = {};
+  orch.setup = parseStepsField("#s-setup", "前置动作");
+  orch.teardown = parseStepsField("#s-teardown", "后置动作");
+  const deps = {};
+  Object.entries(depMap).forEach(([k, v]) => { if (v && v.length) deps[k] = v; });
+  if (Object.keys(deps).length) orch.dependencies = deps;
+  const batches = batchRows
+    .map(b => {
+      const out = { name: (b.name || "").trim() };
+      if (b.rest) out.rest = true;
+      if ((b.tags || []).length) out.tags = b.tags;
+      if ((b.priorities || []).length) out.priorities = b.priorities;
+      if (b.concurrency) out.concurrency = b.concurrency;
+      return out;
+    })
+    .filter(b => b.rest || (b.tags || []).length || (b.priorities || []).length);
+  if (batches.length) orch.batches = batches;
+  if (!orch.setup.length) delete orch.setup;
+  if (!orch.teardown.length) delete orch.teardown;
+  return Object.keys(orch).length ? orch : null;
+}
+
+function fillOrchestration(o) {
+  o = o || {};
+  $("#s-setup").value = (o.setup && o.setup.length) ? JSON.stringify(o.setup, null, 2) : "";
+  $("#s-teardown").value = (o.teardown && o.teardown.length) ? JSON.stringify(o.teardown, null, 2) : "";
+  depMap = {};
+  Object.entries(o.dependencies || {}).forEach(([k, v]) => { depMap[k] = Array.isArray(v) ? [...v] : []; });
+  batchRows = (o.batches || []).map(b => ({
+    name: b.name || "", tags: [...(b.tags || [])], priorities: [...(b.priorities || [])],
+    concurrency: b.concurrency || null, rest: !!b.rest,
+  }));
+  renderBatchEditor();
 }
 
 async function runSuite(id) {
@@ -152,6 +296,7 @@ function newSuite() {
   $("#edit-title").textContent = "新建套件";
   $("#s-name").value = ""; $("#s-desc").value = ""; $("#s-group").value = "";
   $("#s-env").value = "";
+  fillOrchestration(null);
   renderCasePick([]);
   $("#edit-card").style.display = "block";
 }
@@ -163,6 +308,7 @@ function editSuite(id) {
   $("#edit-title").textContent = "编辑套件";
   $("#s-name").value = s.name || ""; $("#s-desc").value = s.description || "";
   $("#s-group").value = s.group || ""; $("#s-env").value = s.env_id || "";
+  fillOrchestration(s.orchestration);
   renderCasePick(s.case_ids || []);
   $("#edit-card").style.display = "block";
 }
@@ -176,13 +322,29 @@ async function delSuite(id) {
 
 $("#btn-new").onclick = newSuite;
 $("#btn-cancel").onclick = () => { $("#edit-card").style.display = "none"; };
+$("#btn-add-batch").onclick = () => {
+  batchRows.push({ name: "", tags: [], priorities: [], concurrency: null, rest: false });
+  renderBatchEditor();
+};
 
 $("#btn-save").onclick = async () => {
   const name = $("#s-name").value.trim();
   if (!name) return toast("请输入套件名称", "error");
-  const caseIds = $$(".pick").filter(c => c.checked).map(c => c.value);
+  const caseIds = pickedCaseIds();
+  let orchestration;
+  try {
+    orchestration = collectOrchestration();
+  } catch (e) { return toast(e.message, "error"); }
+  if (orchestration) {
+    try {
+      const v = await api("/api/suites/validate-orchestration", {
+        method: "POST", body: { orchestration, case_ids: caseIds },
+      });
+      if (!v.ok) return toast("编排配置不合法：" + v.errors.join("；"), "error");
+    } catch (e) { return toast(e.message, "error"); }
+  }
   const body = { name, description: $("#s-desc").value, group: $("#s-group").value,
-    env_id: $("#s-env").value || null, case_ids: caseIds };
+    env_id: $("#s-env").value || null, case_ids: caseIds, orchestration: orchestration || {} };
   if (editingId) {
     await api(`/api/suites/${editingId}`, { method: "PUT", body });
     toast("已保存");

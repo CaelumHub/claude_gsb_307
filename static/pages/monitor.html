@@ -15,6 +15,12 @@
     .live .console { flex: 1; min-height: 320px; }
     .meta-line { font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--border); }
     .result-item { font-size: 13px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    .orch-step { display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+      border-bottom: 1px solid var(--border); font-size: 13px; }
+    .orch-step.sub { padding-left: 26px; color: var(--text-muted); font-size: 12px; }
+    .orch-step .grow { flex: 1; }
+    .orch-msg { color: var(--text-muted); font-size: 12px; }
+    .skip-reason { font-size: 12px; color: var(--violet); margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -50,6 +56,10 @@
           <button class="btn danger small" id="btn-cancel" style="display:none">取消构建</button>
         </div>
         <div id="live-meta"></div>
+        <div class="mt" id="orch-wrap" style="display:none">
+          <h3>编排进度</h3>
+          <div id="orch-steps"></div>
+        </div>
         <div class="mt"><label>实时日志</label>
           <div class="console" id="console">—</div></div>
         <div class="mt"><h3>用例结果</h3><div id="results"></div></div>
@@ -125,11 +135,18 @@ async function poll() {
     $("#live-meta").innerHTML = `
       <div class="row mt">${statusBadge(b.status)}
         <span class="muted" style="font-size:13px">通过 <strong>${b.passed||0}</strong> / 失败 <strong style="color:var(--red)">${(b.failed||0)+(b.error||0)+(b.timeout||0)}</strong> / 共 ${total}</span>
+        ${b.dep_skipped ? `<span class="badge violet">依赖跳过 ${b.dep_skipped}</span>` : ""}
         <span class="muted mono" style="font-size:12px">触发: ${esc(b.trigger||'manual')} · ${fmtTime(b.started_at)}</span>
       </div>
       ${progressBar(total ? done/total : 0, b.status==='passed'?'green':(b.status==='failed'||b.status==='error'?'red':''))}`;
     const running = b.status === "running" || b.status === "pending";
     $("#btn-cancel").style.display = running ? "inline-flex" : "none";
+
+    // 编排进度（前置动作 / 批次 / 后置动作）
+    try {
+      const orch = await api(`/api/builds/${currentBuild}/orchestration`);
+      renderOrchestration(orch);
+    } catch (e) { /* 编排信息不可用时忽略 */ }
 
     // 日志增量
     const logs = await api(`/api/builds/${currentBuild}/logs?after=${logSeq}`);
@@ -147,14 +164,40 @@ async function poll() {
   } catch (e) { /* 构建可能被删除 */ }
 }
 
+function renderOrchestration(orch) {
+  const wrap = $("#orch-wrap");
+  const steps = (orch && orch.steps) || [];
+  if (!steps.length) { wrap.style.display = "none"; return; }
+  wrap.style.display = "block";
+  $("#orch-steps").innerHTML = steps.map(s => {
+    const sub = s.type === "setup_step" || s.type === "teardown_step";
+    let extra = "";
+    if (s.type === "batch") {
+      extra = `<span class="muted" style="font-size:12px">${s.done||0}/${s.total||0} · 并发 ${s.concurrency||"-"}</span>`;
+    }
+    const msg = s.message ? `<span class="orch-msg">${esc(s.message)}</span>` : "";
+    return `<div class="orch-step ${sub ? "sub" : ""}">
+      ${statusBadge(s.status)}
+      <span class="grow">${esc(s.name)}</span>
+      ${extra}${msg}
+      <span class="muted mono" style="font-size:12px">${s.duration ? fmtDur(s.duration) : ""}</span>
+    </div>`;
+  }).join("");
+}
+
 function renderResults(results, running) {
   const host = $("#results");
   if (!results.length) { host.innerHTML = '<div class="muted">' + (running ? "执行中，暂无结果…" : "无结果") + '</div>'; return; }
-  host.innerHTML = `<div style="max-height:260px;overflow:auto">` + results.map(r => `
-    <div class="result-item row spread">
-      <span>${esc(r.case_name||r.case_id)} ${statusBadge(r.status)}</span>
-      <span class="mono muted" style="font-size:12px">${fmtDur(r.duration)}</span>
-    </div>`).join("") + "</div>";
+  host.innerHTML = `<div style="max-height:260px;overflow:auto">` + results.map(r => {
+    const reason = (r.status === "skipped" && r.message)
+      ? `<div class="skip-reason">${esc(skipReasonLabel(r.skip_reason))}${r.skip_reason ? " · " : ""}${esc(r.message)}</div>` : "";
+    return `<div class="result-item">
+      <div class="row spread">
+        <span>${esc(r.case_name||r.case_id)} ${resultBadge(r)}</span>
+        <span class="mono muted" style="font-size:12px">${fmtDur(r.duration)}</span>
+      </div>${reason}
+    </div>`;
+  }).join("") + "</div>";
 }
 
 $("#btn-cancel").onclick = async () => {

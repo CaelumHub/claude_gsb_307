@@ -10,6 +10,7 @@
 - :mod:`engine.report`      测试报告生成（通过率 / 耗时 / 分组 / 趋势）
 - :mod:`engine.defects`     缺陷跟踪
 - :mod:`engine.notify`      通知与集成
+- :mod:`engine.orchestrator`套件编排（前置/后置动作、用例依赖、分批并发）
 - :mod:`engine.scheduler`   并发调度（构建池 + 用例池 + 定时触发循环）
 """
 
@@ -27,6 +28,8 @@ from .coverage import CoverageAnalyzer
 from .report import ReportGenerator
 from .defects import DefectManager
 from .notify import NotificationManager
+from .orchestrator import (SKIP_DEPENDENCY, validate_orchestration,
+                           build_plan)
 from .scheduler import Scheduler
 
 __all__ = [
@@ -45,5 +48,8 @@ __all__ = [
     "ReportGenerator",
     "DefectManager",
     "NotificationManager",
+    "SKIP_DEPENDENCY",
+    "validate_orchestration",
+    "build_plan",
     "Scheduler",
 ]
